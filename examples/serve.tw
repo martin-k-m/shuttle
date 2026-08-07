@@ -1,0 +1,140 @@
+mode systems
+
+# Loading a published model and answering with it, three ways.
+#
+# There is no server here and there cannot be. twill has no sockets and no
+# process interface, so nothing can listen. This is the library a server would
+# be built on, driven by a program instead of by a socket, and the README says
+# so at the top rather than leaving it to be discovered.
+#
+# This does not run. shuttle is written in twill's systems subset, which is
+# still being implemented. See docs/needs.md.
+
+import "../src/model.tw" as md
+import "../src/signature.tw" as sg
+import "../src/predict.tw" as pr
+import "../src/batcher.tw" as bat
+import "../src/warmup.tw" as wu
+import "../src/quant.tw" as q
+import "../src/score.tw" as sc
+
+# The forward pass. Yours, not shuttle's. shuttle owns the signature check, the
+# batching, the warmup and the counting, and nothing else.
+fn forward(p: Tree, x: Tensor) -> Tensor {
+  let h = relu(x @ transpose(p.w1) + p.b1)
+  h @ transpose(p.w2) + p.b2
+}
+
+# ---- load ------------------------------------------------------------------
+#
+# From a selvedge archive, so the signature is what the model was published
+# with rather than what this file believes. Integrity is verified before the
+# weights are trusted: a serving process is the last place anyone will look at
+# the file, and a corrupt payload that reaches a forward pass produces
+# predictions rather than an error.
+let loaded = md.from_archive("models/blobs-1.2.0.slv")
+if len(loaded.err) > 0 {
+  print("shuttle: " + loaded.err)
+  exit(1)
+}
+let model = loaded.model
+print(md.describe(model))
+
+# ---- the batching trade ----------------------------------------------------
+#
+# Both numbers are required and neither has a default, because the right answer
+# is different for a fraud check and for an overnight job and neither is
+# knowable from inside a library.
+#
+#   max_batch 32   throughput. Up to 32 rows in one forward pass.
+#   max_hold  4    latency. A queued request waits through at most 4 arrivals.
+#
+# max_hold counts arrivals and not milliseconds, because twill has no clock.
+# That is a worse knob than a duration and it is the honest one; see the top of
+# src/batcher.tw for what it means under thin traffic.
+let cfg = bat.config(32, 4)
+let cfg_err = bat.validate(cfg)
+if len(cfg_err) > 0 {
+  print("shuttle: " + cfg_err)
+  exit(1)
+}
+
+# ---- warm up ---------------------------------------------------------------
+#
+# At the two batch sizes the service will actually run: 1 when traffic is thin,
+# 32 when it is not. What this does and does not cover is written out at the top
+# of src/warmup.tw, and it is a shorter list than warmup in other frameworks
+# because twill has no JIT and no kernel selection to warm.
+let w = wu.warm(model, wu.sizes_for(cfg.max_batch), forward)
+print(wu.report(w))
+
+# ---- one request -----------------------------------------------------------
+
+let one = pr.predict(model, [1.2, 0.4, 0.0 - 0.8, 2.1], forward)
+if len(one.err) > 0 {
+  print("shuttle: " + one.err)
+} else {
+  let probs = pr.probabilities(model, reshape(one.out, [1, 3]))
+  print("class " + str(item(argmax(one.out, 0))) + " with " + str(item(max(probs.idx))))
+}
+
+# A bad request gets twill's kind of message rather than a failure inside a
+# matmul four calls deep.
+let bad = pr.predict(model, [1.0, 2.0], forward)
+print(bad.err)
+
+# ---- many requests, batched ------------------------------------------------
+
+let bt = bat.batcher(cfg)
+let arrivals = read_csv("requests.csv")
+let i = 0
+while i < shape(arrivals)[0] {
+  let err = bat.submit(bt, model, arrivals[i])
+  if len(err) > 0 {
+    print("refused: " + err)
+  }
+  if bat.ready(bt) {
+    let batch = bat.run(bt, model, forward)
+    if len(batch.err) > 0 {
+      print("shuttle: " + batch.err)
+    }
+  }
+  i = i + 1
+}
+# The last partial batch. The caller's job, because only the caller knows its
+# input is exhausted, and forgetting it is how a batcher loses the tail of a
+# file.
+bat.flush(bt, model, forward)
+print(bat.report(bt))
+
+# ---- scoring a file --------------------------------------------------------
+#
+# Chunked, so peak memory is the chunk's activations rather than the file's.
+# Progress is rows and a percentage, with no time estimate, because there is no
+# clock to extrapolate from.
+let scored = sc.score_csv(model, "batch.csv", 512,
+  sc.progress(5000, "scoring", 0), forward)
+if len(scored.err) > 0 {
+  print("shuttle: " + scored.err)
+} else {
+  print("scored " + str(scored.rows) + " rows")
+}
+
+# ---- what quantisation would cost ------------------------------------------
+#
+# Not what it saves. twill stores every tensor as float64, so quantising does
+# not shrink the file today and does not speed anything up. What it does is
+# apply the exact numerics int8 would apply, so the accuracy question can be
+# answered on your own held-out data instead of guessed at from a table.
+let held_out = read_csv("holdout.csv")
+
+let as_f16 = q.quantize(model, q.SCHEME_F16, q.minmax())
+print("f16:  " + q.report(q.compare(model, as_f16.model, held_out, forward)))
+
+# Percentile calibration, because one outlier weight in a tensor makes the step
+# coarse for every other weight in it.
+let as_int8 = q.quantize(model, q.SCHEME_INT8, q.percentile(0.999))
+print("int8: " + q.report(q.compare(model, as_int8.model, held_out, forward)))
+
+print("stored today:  " + str(q.stored_bytes(model)) + " bytes")
+print("int8 projected: " + str(q.projected_bytes(model, q.SCHEME_INT8, 4)) + " bytes")

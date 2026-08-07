@@ -1,0 +1,205 @@
+mode systems
+
+# warmup.tw: paying the first request's costs before there is a first request.
+#
+# ---- what warmup is ---------------------------------------------------------
+#
+# Run the model on synthetic input, of the shapes real requests will have,
+# before the service starts answering. Anything the first call would allocate,
+# resolve or fault in is done while nobody is waiting.
+#
+# ---- what warmup covers, exactly -------------------------------------------
+#
+# This list is the point of the file. A warmup with an unstated scope is a
+# ritual: it makes the first request faster by some amount nobody measured,
+# against costs nobody enumerated, and it gets cargo-culted into places it does
+# nothing.
+#
+#   COVERED
+#
+#   Lazy work inside the forward function. If your forward pass builds a
+#   constant, a mask, a positional encoding or a lookup table on first use and
+#   caches it, warmup builds it. This is the largest real cost in practice and
+#   it is entirely in your code, not shuttle's.
+#
+#   Interpreter work that is per-shape. The tree-walking evaluator resolves
+#   names, allocates intermediates and dispatches builtins per call. The
+#   allocations are not cached, so this is only warmed to the extent that the
+#   allocator's arena has grown.
+#
+#   Quantisation. src/quant.tw dequantises a parameter tree on first use.
+#   Warming a quantised model does that work up front, and for an int8 model
+#   this is the largest single item on this list.
+#
+#   Faulting the parameters in. Reading a large archive leaves pages the OS has
+#   not touched. The first forward pass touches them. Warmup touches them
+#   instead.
+#
+#   Every distinct batch shape you name. Not "the model", a shape. A model
+#   warmed at batch 1 and asked for batch 64 pays the batch-64 costs on the
+#   batch-64 request, which is why `shapes` below takes a list.
+#
+#   NOT COVERED
+#
+#   JIT compilation, kernel selection, autotuning. twill has none of these. If
+#   you have read about warmup in the context of another framework, most of
+#   what it was buying there does not exist here to buy.
+#
+#   GPU anything. There is no GPU backend.
+#
+#   The operating system's file cache for anything you have not read yet. A
+#   model that loads a second file lazily is not warmed by this.
+#
+#   Data-dependent branches. A model whose cost depends on its input values,
+#   not just its shapes, is warmed on the wrong path by synthetic input. A
+#   boosted-tree model is the case that matters: the tree walked depends on the
+#   feature values. `warm_with` takes real rows for exactly this.
+#
+#   Anything after the first request. Warmup is about the first one. If your
+#   tail latency is bad at request 10,000, this file is not the problem or the
+#   fix.
+#
+# ---- the honest summary ----------------------------------------------------
+#
+# For a dense float model in twill today, warmup buys you the lazy work in your
+# own forward function and the page faults. That is a real number and it is not
+# a large one. For an int8 model it buys the dequantisation, which is large.
+# Neither is guessed at here: `Warmup.passes` and the shapes it covered are
+# reported, and the timing is yours to measure because twill has no clock
+# (docs/needs.md entry 3).
+
+import "signature.tw" as sg
+import "model.tw" as md
+
+struct Warmup {
+  # Batch sizes warmed, in the order run.
+  sizes: Arr[I64],
+  passes: I64,
+  err: Str,
+}
+
+# Warm the model at each of the given batch sizes.
+#
+# Synthetic input, drawn from the standard normal rather than zeros. Zeros are
+# cheaper and are the wrong choice: a relu on a zero input is uniformly on the
+# flat side, and any code path guarded by a comparison against zero takes one
+# branch every time. Normal input exercises both sides of an activation, which
+# is the point.
+#
+# Seeded, so warmup does not move the generator relative to a run that did not
+# warm up. Nothing else in shuttle draws random numbers, so this is the only
+# place the seed could leak, and it is set here rather than left to the caller.
+fn warm(m: md.Model, sizes: Arr[I64], forward: fn(Tree, Tensor) -> Tensor) -> Warmup {
+  let w = Warmup { sizes: [], passes: 0, err: "" }
+  if len(sizes) == 0 {
+    w.err = "warmup needs at least one batch size: warming nothing warms nothing"
+    return w
+  }
+  seed(1)
+  let i: I64 = 0
+  while i < len(sizes) {
+    let n = sizes[i]
+    if n < 1 {
+      w.err = "a warmup batch size must be at least 1, and " + str(n) + " is not"
+      return w
+    }
+    let x = synthetic(m.sig, n)
+    let err = sg.check_input(m.sig, x)
+    if len(err) > 0 {
+      # A synthetic input that fails the model's own signature check means the
+      # signature describes a shape this code cannot build, which is a bug here
+      # or a signature that is wrong. Either way it is worth stopping for.
+      w.err = "warmup could not build an input matching " + sg.shape_str(m.sig.input)
+        + ": " + err
+      return w
+    }
+    forward(m.params, x)
+    w.sizes = arr_push(w.sizes, n)
+    w.passes = w.passes + 1
+    i = i + 1
+  }
+  m.warmed = true
+  w
+}
+
+# Warm with real rows rather than synthetic ones.
+#
+# For a model whose cost depends on its input values and not only their shapes:
+# a boosted-tree model walks a different path per row, and synthetic input warms
+# the wrong branches. Also for anything where the input has structure a normal
+# draw does not have, such as one-hot columns.
+#
+# Takes rows from the front of `sample`, which means the sample should be
+# representative rather than sorted. That is the caller's problem and it is
+# stated because it is easy to hand in the first n rows of a file sorted by
+# label.
+fn warm_with(m: md.Model, sample: Tensor, sizes: Arr[I64],
+             forward: fn(Tree, Tensor) -> Tensor) -> Warmup {
+  let w = Warmup { sizes: [], passes: 0, err: "" }
+  let err = sg.check_input(m.sig, sample)
+  if len(err) > 0 {
+    w.err = "the warmup sample does not match the model: " + err
+    return w
+  }
+  let have = shape(sample)[0]
+  let i: I64 = 0
+  while i < len(sizes) {
+    let n = sizes[i]
+    if n > have {
+      w.err = "warmup was asked for a batch of " + str(n)
+        + " and the sample holds " + str(have) + " rows"
+      return w
+    }
+    forward(m.params, sample[0:n])
+    w.sizes = arr_push(w.sizes, n)
+    w.passes = w.passes + 1
+    i = i + 1
+  }
+  m.warmed = true
+  w
+}
+
+# Synthetic input of `rows` rows, matching the model's declared input shape.
+fn synthetic(s: sg.Signature, rows: I64) -> Tensor {
+  let want: Arr[I64] = [rows]
+  let n = rows
+  let i: I64 = 1
+  while i < len(s.input) {
+    let d = s.input[i]
+    if d == sg.FREE {
+      # A free axis that is not the batch axis has no size warmup can pick, so
+      # it gets 1. A model with a genuinely variable inner axis needs
+      # `warm_with` and real rows.
+      d = 1
+    }
+    want = arr_push(want, d)
+    n = n * d
+    i = i + 1
+  }
+  reshape(randn(n), want)
+}
+
+# The batch sizes worth warming, given a batcher's configuration.
+#
+# 1 and max_batch, because those are the two the service will actually run:
+# every request alone when the hold is short or traffic is thin, and a full
+# batch when it is not. The sizes in between cost proportionally less to miss.
+fn sizes_for(max_batch: I64) -> Arr[I64] {
+  if max_batch <= 1 {
+    return [1]
+  }
+  [1, max_batch]
+}
+
+fn report(w: Warmup) -> Str {
+  if len(w.err) > 0 {
+    return "warmup failed: " + w.err
+  }
+  let out = "warmed " + str(w.passes) + " pass(es) at batch sizes"
+  let i: I64 = 0
+  while i < len(w.sizes) {
+    out = out + " " + str(w.sizes[i])
+    i = i + 1
+  }
+  out
+}

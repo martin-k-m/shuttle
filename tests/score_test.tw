@@ -1,0 +1,178 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/signature.tw" as sg
+import "../src/model.tw" as md
+import "../src/score.tw" as sc
+import "../src/warmup.tw" as wu
+import "../src/bytes_compat.tw" as b
+
+fn params() -> Tree {
+  { w: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+    b: [0.0, 0.0, 0.0] }
+}
+
+fn forward(p: Tree, x: Tensor) -> Tensor = x @ transpose(p.w) + p.b
+
+fn a_model() -> md.Model {
+  md.Model { params: params(), sig: sg.rows_of(4, 3, "logits"),
+             name: "toy", version: "toy@1.0.0", digest: "", architecture: "linear",
+             warmed: false, precision: "f64" }
+}
+
+# Rows whose argmax is row index mod 3, so accuracy is checkable by hand.
+fn a_dataset(rows: I64) -> Tensor {
+  let parts: Arr[Tensor] = []
+  let i: I64 = 0
+  while i < rows {
+    let k = i - (i / 3) * 3
+    if k == 0 {
+      parts = arr_push(parts, [[1.0, 0.0, 0.0, 0.0]])
+    }
+    if k == 1 {
+      parts = arr_push(parts, [[0.0, 1.0, 0.0, 0.0]])
+    }
+    if k == 2 {
+      parts = arr_push(parts, [[0.0, 0.0, 1.0, 0.0]])
+    }
+    i = i + 1
+  }
+  concat(parts, 0)
+}
+
+fn a_label_vector(rows: I64) -> Tensor {
+  let out: Arr[F64] = []
+  let i: I64 = 0
+  while i < rows {
+    out = arr_push(out, f64(i - (i / 3) * 3))
+    i = i + 1
+  }
+  tensor(out)
+}
+
+fn scoring_covers_every_row_in_order() {
+  let x = a_dataset(10)
+  let got = sc.score(a_model(), x, 4, sc.silent(), forward)
+  t.equal_str("no error", got.err, "")
+  t.equal_i64("every row", got.rows, 10)
+  t.equal_i64("one output row each", shape(got.out)[0], 10)
+  t.near("row 0 scores class 0 highest", item(got.out[0][0]), 1.0, 0.000001)
+  t.near("row 1 scores class 1 highest", item(got.out[1][1]), 1.0, 0.000001)
+}
+
+fn the_chunk_size_does_not_change_the_answer() {
+  # It changes peak memory and nothing else. A chunking bug that dropped or
+  # duplicated a row would show up here and nowhere else.
+  let x = a_dataset(17)
+  let one = sc.score(a_model(), x, 1, sc.silent(), forward)
+  let big = sc.score(a_model(), x, 64, sc.silent(), forward)
+  let odd = sc.score(a_model(), x, 5, sc.silent(), forward)
+  t.check("chunk 1 and chunk 64 agree", one.out == big.out)
+  t.check("and a chunk that does not divide the input agrees too", odd.out == big.out)
+}
+
+fn a_short_final_chunk_is_scored_and_not_dropped() {
+  let got = sc.score(a_model(), a_dataset(10), 4, sc.silent(), forward)
+  t.equal_i64("ten rows at four is two full chunks and a two-row remainder",
+    got.rows, 10)
+}
+
+fn a_bad_input_is_refused_before_anything_runs() {
+  let got = sc.score(a_model(), zeros(10, 9), 4, sc.silent(), forward)
+  t.check("refused", len(got.err) > 0)
+  t.check("and the model is named", b.index_of(got.err, "toy") >= 0)
+}
+
+fn a_zero_chunk_size_is_refused() {
+  t.check("refused", len(sc.score(a_model(), a_dataset(4), 0, sc.silent(), forward).err) > 0)
+}
+
+fn streaming_to_a_sink_holds_nothing_and_visits_everything() {
+  let seen = 0
+  let starts: Arr[I64] = []
+  let err = sc.score_to(a_model(), a_dataset(10), 4, sc.silent(), forward,
+    fn(out: Tensor, lo: I64) -> Str {
+      seen = seen + shape(out)[0]
+      starts = arr_push(starts, lo)
+      ""
+    })
+  t.equal_str("no error", err, "")
+  t.equal_i64("every row reached the sink", seen, 10)
+  t.equal_i64("in three chunks", len(starts), 3)
+}
+
+fn progress_counts_rows_and_reports_a_percentage() {
+  let p = sc.progress(4, "scoring", 10)
+  sc.advance(p, 4)
+  t.equal_i64("four done", p.done, 4)
+  t.check("and the line carries the total", b.index_of(sc.line(p), "4/10") >= 0)
+  t.check("and a percentage", b.index_of(sc.line(p), "40%") >= 0)
+}
+
+fn a_silent_progress_prints_nothing_and_still_counts() {
+  let p = sc.silent()
+  sc.advance(p, 7)
+  t.equal_i64("the count is kept", p.done, 7)
+}
+
+fn evaluate_counts_the_rows_the_model_got_right() {
+  let x = a_dataset(9)
+  let y = a_label_vector(9)
+  let e = sc.evaluate(a_model(), x, y, 4, sc.silent(), forward)
+  t.equal_str("no error", e.err, "")
+  t.equal_i64("nine rows", e.rows, 9)
+  t.equal_i64("all correct", e.correct, 9)
+  t.near("so accuracy is one", e.accuracy, 1.0, 0.000001)
+}
+
+fn evaluate_refuses_a_label_vector_of_the_wrong_length() {
+  let e = sc.evaluate(a_model(), a_dataset(9), a_label_vector(8), 4, sc.silent(), forward)
+  t.check("refused", len(e.err) > 0)
+  t.check("with both counts", b.index_of(e.err, "9") >= 0)
+}
+
+fn evaluate_refuses_a_regression_rather_than_inventing_a_tolerance() {
+  let m = a_model()
+  m.sig = sg.rows_of(4, 3, "regression")
+  let e = sc.evaluate(m, a_dataset(3), a_label_vector(3), 4, sc.silent(), forward)
+  t.check("refused", len(e.err) > 0)
+  t.check("and it says to pick an error measure",
+    b.index_of(e.err, "error measure") >= 0)
+}
+
+fn warmup_runs_the_shapes_it_was_asked_for_and_says_which() {
+  let m = a_model()
+  let w = wu.warm(m, wu.sizes_for(16), forward)
+  t.equal_str("no error", w.err, "")
+  t.equal_i64("two passes", w.passes, 2)
+  t.equal_i64("at batch 1", w.sizes[0], 1)
+  t.equal_i64("and at the full batch", w.sizes[1], 16)
+  t.check("and the model is marked warm", m.warmed)
+}
+
+fn warming_nothing_is_refused_rather_than_quietly_doing_nothing() {
+  let w = wu.warm(a_model(), [], forward)
+  t.check("refused", len(w.err) > 0)
+}
+
+fn warming_with_real_rows_refuses_a_sample_that_is_too_small() {
+  let w = wu.warm_with(a_model(), a_dataset(4), [8], forward)
+  t.check("refused", len(w.err) > 0)
+  t.check("and it says how many rows there were", b.index_of(w.err, "4") >= 0)
+}
+
+scoring_covers_every_row_in_order()
+the_chunk_size_does_not_change_the_answer()
+a_short_final_chunk_is_scored_and_not_dropped()
+a_bad_input_is_refused_before_anything_runs()
+a_zero_chunk_size_is_refused()
+streaming_to_a_sink_holds_nothing_and_visits_everything()
+progress_counts_rows_and_reports_a_percentage()
+a_silent_progress_prints_nothing_and_still_counts()
+evaluate_counts_the_rows_the_model_got_right()
+evaluate_refuses_a_label_vector_of_the_wrong_length()
+evaluate_refuses_a_regression_rather_than_inventing_a_tolerance()
+warmup_runs_the_shapes_it_was_asked_for_and_says_which()
+warming_nothing_is_refused_rather_than_quietly_doing_nothing()
+warming_with_real_rows_refuses_a_sample_that_is_too_small()
+t.report("score")

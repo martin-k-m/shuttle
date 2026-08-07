@@ -1,0 +1,111 @@
+mode systems
+
+# The shape checks, which are the reason shuttle exists as more than a loop.
+#
+# The tests assert the message text and not only that an error happened. A shape
+# error whose message does not name the axis is a shape error someone has to
+# debug, which is the situation twill's checker exists to prevent and which
+# serving otherwise reintroduces.
+
+import "harness.tw" as t
+import "../src/signature.tw" as sg
+import "../src/bytes_compat.tw" as b
+
+fn sig() -> sg.Signature = sg.rows_of(4, 3, "logits")
+
+fn a_matching_batch_passes() {
+  t.equal_str("a batch of 8 rows of 4", sg.check_input(sig(), zeros(8, 4)), "")
+}
+
+fn any_batch_size_passes_because_the_batch_axis_is_free() {
+  t.equal_str("one row", sg.check_input(sig(), zeros(1, 4)), "")
+  t.equal_str("a thousand rows", sg.check_input(sig(), zeros(1000, 4)), "")
+}
+
+fn a_wrong_feature_count_names_the_axis_and_both_numbers() {
+  let err = sg.check_input(sig(), zeros(8, 6))
+  t.check("it is refused", len(err) > 0)
+  t.check("the axis is named", b.index_of(err, "axis 1") >= 0)
+  t.check("what was given is named", b.index_of(err, "is 6") >= 0)
+  t.check("what is expected is named", b.index_of(err, "expects 4") >= 0)
+}
+
+fn a_wrong_rank_is_reported_as_a_rank_problem_and_not_an_axis_one() {
+  # Reporting "axis 1 is wrong" for a rank-1 input sends someone looking for an
+  # axis the tensor does not have.
+  let err = sg.check_input(sig(), zeros(4))
+  t.check("it is refused", len(err) > 0)
+  t.check("and the message is about rank", b.index_of(err, "rank") >= 0)
+}
+
+fn an_empty_batch_is_refused_rather_than_answered_with_nothing() {
+  # A zero-row tensor survives a forward pass and comes out as a zero-row
+  # output. A service that silently returns nothing for an empty request is a
+  # service whose caller has a bug it cannot see.
+  let err = sg.check_input(sig(), zeros(0, 4))
+  t.check("it is refused", len(err) > 0)
+  t.check("and the message says there are no rows", b.index_of(err, "no rows") >= 0)
+}
+
+fn a_single_row_passes_the_single_input_check() {
+  t.equal_str("a [4] vector", sg.check_one(sig(), zeros(4)), "")
+}
+
+fn a_batch_passed_to_the_single_path_is_diagnosed_specifically() {
+  # The overwhelmingly common version of this mistake, so it gets its own half
+  # of the message rather than the generic rank complaint.
+  let err = sg.check_one(sig(), zeros(8, 4))
+  t.check("it is refused", len(err) > 0)
+  t.check("and it says which function takes a batch",
+    b.index_of(err, "predict_batch") >= 0)
+}
+
+fn a_free_axis_prints_as_an_underscore_the_way_twill_writes_it() {
+  t.equal_str("the input shape", sg.shape_str(sig().input), "[_, 4]")
+  t.equal_str("a fixed shape", sg.shape_str([2, 3]), "[2, 3]")
+  t.equal_str("a scalar", sg.shape_str([]), "[]")
+}
+
+fn a_higher_rank_input_works_because_images_exist() {
+  let s = sg.signature([-1, 1, 28, 28], [-1, 10], "logits")
+  t.equal_str("a batch of images", sg.check_input(s, zeros(16, 1, 28, 28)), "")
+  let err = sg.check_input(s, zeros(16, 1, 28, 32))
+  t.check("a wrong width is refused", len(err) > 0)
+  t.check("and axis 3 is named", b.index_of(err, "axis 3") >= 0)
+}
+
+fn the_row_shape_drops_the_batch_axis() {
+  let r = sg.row_shape(sg.signature([-1, 1, 28, 28], [-1, 10], "logits"))
+  t.equal_i64("rank 3", len(r), 3)
+  t.equal_i64("channels", r[0], 1)
+  t.equal_i64("height", r[1], 28)
+}
+
+fn row_elements_counts_one_request() {
+  t.equal_i64("a 4-feature row", sg.row_elements(sig()), 4)
+  t.equal_i64("one 28 by 28 image",
+    sg.row_elements(sg.signature([-1, 1, 28, 28], [-1, 10], "logits")), 784)
+}
+
+fn two_signatures_differing_only_in_output_kind_are_not_equal() {
+  # The field exists to stop softmax being applied twice, so it has to
+  # participate in equality or it is decorative.
+  t.check("logits is not probabilities",
+    not sg.equal(sg.rows_of(4, 3, "logits"), sg.rows_of(4, 3, "probabilities")))
+  t.check("and the same signature is equal to itself",
+    sg.equal(sg.rows_of(4, 3, "logits"), sg.rows_of(4, 3, "logits")))
+}
+
+a_matching_batch_passes()
+any_batch_size_passes_because_the_batch_axis_is_free()
+a_wrong_feature_count_names_the_axis_and_both_numbers()
+a_wrong_rank_is_reported_as_a_rank_problem_and_not_an_axis_one()
+an_empty_batch_is_refused_rather_than_answered_with_nothing()
+a_single_row_passes_the_single_input_check()
+a_batch_passed_to_the_single_path_is_diagnosed_specifically()
+a_free_axis_prints_as_an_underscore_the_way_twill_writes_it()
+a_higher_rank_input_works_because_images_exist()
+the_row_shape_drops_the_batch_axis()
+row_elements_counts_one_request()
+two_signatures_differing_only_in_output_kind_are_not_equal()
+t.report("signature")

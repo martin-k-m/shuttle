@@ -1,0 +1,238 @@
+mode systems
+
+# score.tw: running a model over a dataset, with progress.
+#
+# The offline half of serving. No requests arrive; the input is a file and the
+# job is to get through it. That changes what matters: latency is irrelevant,
+# throughput is everything, and the failure that hurts is running out of memory
+# at 80% through a four-hour job.
+#
+# So scoring streams. `predict_batch` on a million rows materialises a million
+# rows of every intermediate in the forward pass, and peak memory is the input
+# times the widest layer. Scoring cuts the input into chunks and holds one
+# chunk's activations at a time. It is slower per row than one enormous pass
+# would be, in the same way that finishing is slower than not finishing.
+#
+# ---- progress --------------------------------------------------------------
+#
+# Rows done, rows total, percent. No time estimate, and that is a gap rather
+# than a decision: twill has no clock, so there is no elapsed time to
+# extrapolate from. The useful part of a progress report on a four-hour job is
+# the time remaining, so this is worse than what a progress bar should be, and
+# it is worse in exactly the way loom's is, for the same missing primitive.
+# docs/needs.md entry 3.
+#
+# Progress goes to stdout as plain lines, uncoloured. twill has a terminal layer
+# with capability detection and a palette, in `src/term/`, and shuttle cannot
+# reach it: twill resolves a non-`std/` import as a path relative to the
+# importing file, so only `std/` modules are reachable from an installed
+# package. Same wall loom hit, same argument against duplicating the bar here,
+# same fix, which is `std/term`. docs/needs.md entry 11.
+
+import "signature.tw" as sg
+import "model.tw" as md
+import "predict.tw" as pr
+
+struct Progress {
+  # Report after this many rows. 0 reports nothing, which is the right setting
+  # for a job whose output is being piped somewhere.
+  every: I64,
+  label: Str,
+  # Rows since the last report, and rows in total.
+  since: I64,
+  done: I64,
+  total: I64,
+}
+
+fn progress(every: I64, label: Str, total: I64) -> Progress {
+  Progress { every: every, label: label, since: 0, done: 0, total: total }
+}
+
+fn silent() -> Progress = progress(0, "", 0)
+
+fn advance(p: Progress, rows: I64) {
+  p.done = p.done + rows
+  p.since = p.since + rows
+  if p.every > 0 and p.since >= p.every {
+    print(line(p))
+    p.since = 0
+  }
+}
+
+fn finish(p: Progress) {
+  if p.every > 0 {
+    print(line(p))
+  }
+}
+
+fn line(p: Progress) -> Str {
+  if p.total <= 0 {
+    return p.label + " " + str(p.done) + " rows"
+  }
+  p.label + " " + str(p.done) + "/" + str(p.total)
+    + " (" + str(i64(f64(p.done) * 100.0 / f64(p.total))) + "%)"
+}
+
+struct Score {
+  # One row per input row, in input order. Order is the contract: a caller
+  # matching scores back to rows by index has no other way.
+  out: Tensor,
+  rows: I64,
+  err: Str,
+}
+
+# Score a whole dataset, accumulating the output.
+#
+# Accumulates chunk outputs in an array and concatenates once at the end.
+# Concatenating as it goes would be quadratic in the number of chunks and would
+# copy the whole accumulated output on every chunk, which for a 1000-chunk job
+# is 1000 copies of an average of half the result.
+#
+# Note what this still holds: the whole output. For a classifier over a million
+# rows that is a million by n_classes, which is fine, and for a model whose
+# output is as large as its input it is not. `score_to` below is the version
+# that holds nothing.
+fn score(m: md.Model, x: Tensor, chunk: I64, p: Progress,
+         forward: fn(Tree, Tensor) -> Tensor) -> Score {
+  let err = sg.check_input(m.sig, x)
+  if len(err) > 0 {
+    return Score { out: zeros(0), rows: 0, err: m.name + ": " + err }
+  }
+  if chunk <= 0 {
+    return Score { out: zeros(0), rows: 0,
+                   err: "a scoring chunk size must be positive, and " + str(chunk) + " is not" }
+  }
+  let rows = shape(x)[0]
+  p.total = rows
+  let parts: Arr[Tensor] = []
+  let failure = ""
+  let lo: I64 = 0
+  while lo < rows and len(failure) == 0 {
+    let hi = lo + chunk
+    if hi > rows {
+      hi = rows
+    }
+    let got = pr.predict_batch(m, x[lo:hi], forward)
+    if len(got.err) > 0 {
+      # The row range is in the message. A model that fails on one chunk of a
+      # million-row file fails because of something in those rows, and "it
+      # failed" without saying where means reading the whole file to find out.
+      failure = "rows " + str(lo) + " to " + str(hi) + ": " + got.err
+    } else {
+      parts = arr_push(parts, got.out)
+      advance(p, hi - lo)
+    }
+    lo = hi
+  }
+  if len(failure) > 0 {
+    return Score { out: zeros(0), rows: 0, err: failure }
+  }
+  finish(p)
+  Score { out: concat(parts, 0), rows: rows, err: "" }
+}
+
+# Score a dataset and hand each chunk's output to `sink` instead of keeping it.
+#
+# For an output too large to hold, and for anything writing results out as it
+# goes. `sink` gets the chunk's output and the index of its first row, and
+# returns an error string; a non-empty one stops the job, which is how a caller
+# cancels.
+fn score_to(m: md.Model, x: Tensor, chunk: I64, p: Progress,
+            forward: fn(Tree, Tensor) -> Tensor,
+            sink: fn(Tensor, I64) -> Str) -> Str {
+  let err = sg.check_input(m.sig, x)
+  if len(err) > 0 {
+    return m.name + ": " + err
+  }
+  p.total = shape(x)[0]
+  let serr = pr.predict_stream(m, x, chunk, forward, fn(out: Tensor, lo: I64) -> Str {
+    let e = sink(out, lo)
+    if len(e) > 0 {
+      return e
+    }
+    advance(p, shape(out)[0])
+    ""
+  })
+  if len(serr) > 0 {
+    return serr
+  }
+  finish(p)
+  ""
+}
+
+# ---- scoring a file --------------------------------------------------------
+
+# Score a CSV whose columns are the model's features.
+#
+# `read_csv` gives a [rows, cols] tensor. The column count is checked against
+# the signature before anything runs, with a message that names both, because
+# the alternative is discovering a column mismatch as a shape error inside the
+# first matmul.
+#
+# The whole file is read into memory. There is no streaming CSV reader in twill,
+# so a file larger than memory cannot be scored, and the chunking below bounds
+# the activations rather than the input. Stated because "it streams" would
+# otherwise be read as more than it is. docs/needs.md entry 5.
+fn score_csv(m: md.Model, path: Str, chunk: I64, p: Progress,
+             forward: fn(Tree, Tensor) -> Tensor) -> Score {
+  let x = read_csv(path)
+  let cols = shape(x)[1]
+  let want = expected_columns(m)
+  if want > 0 and cols != want {
+    return Score { out: zeros(0), rows: 0,
+      err: path + " has " + str(cols) + " columns and " + m.name
+        + " expects " + str(want) + " features" }
+  }
+  score(m, x, chunk, p, forward)
+}
+
+# Features per row, from the signature, or -1 when the input is not rank 2.
+fn expected_columns(m: md.Model) -> I64 {
+  if len(m.sig.input) != 2 {
+    return -1
+  }
+  m.sig.input[1]
+}
+
+# ---- accuracy over a labelled dataset --------------------------------------
+
+struct Evaluation {
+  rows: I64,
+  correct: I64,
+  accuracy: F64,
+  err: Str,
+}
+
+# Score a labelled dataset and count the rows the model got right.
+#
+# Here rather than in a metrics library because it is the one thing every
+# batch-scoring job wants immediately after scoring, and because it is the
+# function that turns src/quant.tw's UNMEASURED accuracy column into a number
+# you have measured on your own data.
+#
+# Classifiers only. A regression has no notion of correct, and this refuses
+# rather than inventing a tolerance, because the tolerance is the whole question
+# and it is not shuttle's to answer.
+fn evaluate(m: md.Model, x: Tensor, y: Tensor, chunk: I64, p: Progress,
+            forward: fn(Tree, Tensor) -> Tensor) -> Evaluation {
+  if m.sig.output_kind == "regression" {
+    return Evaluation { rows: 0, correct: 0, accuracy: 0.0,
+      err: m.name + " returns a regression, which has no accuracy: pick an error measure" }
+  }
+  let s = score(m, x, chunk, p, forward)
+  if len(s.err) > 0 {
+    return Evaluation { rows: 0, correct: 0, accuracy: 0.0, err: s.err }
+  }
+  if shape(y)[0] != s.rows {
+    return Evaluation { rows: 0, correct: 0, accuracy: 0.0,
+      err: "there are " + str(s.rows) + " predictions and " + str(shape(y)[0]) + " labels" }
+  }
+  let pred = argmax(s.out, 1)
+  let correct = i64(item(sum(where(pred == y, 1.0, 0.0))))
+  Evaluation {
+    rows: s.rows,
+    correct: correct,
+    accuracy: f64(correct) / f64(s.rows),
+    err: "",
+  }
+}

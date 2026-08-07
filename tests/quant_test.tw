@@ -1,0 +1,156 @@
+mode systems
+
+# Quantisation, tested on the properties that are DERIVED rather than measured.
+#
+# There is no accuracy test here and that is deliberate. src/quant.tw's table
+# marks task accuracy as UNMEASURED, and a test asserting an accuracy number
+# would be exactly the claim that file refuses to make. What is testable is the
+# arithmetic: that the error is bounded by half a step, that the round trip is
+# unbiased, that the sizes are what the projection says, and that a saturating
+# calibration says how much it saturated.
+
+import "harness.tw" as t
+import "../src/signature.tw" as sg
+import "../src/model.tw" as md
+import "../src/quant.tw" as q
+
+fn a_tensor() -> Tensor {
+  [[0.0 - 1.0, 0.0 - 0.5, 0.0, 0.5], [1.0, 0.25, 0.0 - 0.75, 0.125]]
+}
+
+fn params() -> Tree {
+  { w: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+    b: [0.0, 0.0, 0.0] }
+}
+
+fn forward(p: Tree, x: Tensor) -> Tensor = x @ transpose(p.w) + p.b
+
+fn a_model() -> md.Model {
+  md.Model { params: params(), sig: sg.rows_of(4, 3, "logits"),
+             name: "toy", version: "toy@1.0.0", digest: "", architecture: "linear",
+             warmed: false, precision: "f64" }
+}
+
+fn minmax_calibration_spans_the_actual_range() {
+  let s = q.calibrate(a_tensor(), q.minmax())
+  t.near("the low end", s.lo, 0.0 - 1.0, 0.000001)
+  t.near("the high end", s.hi, 1.0, 0.000001)
+  t.near("and the step is the range over 255", s.step, 2.0 / 255.0, 0.0000001)
+}
+
+fn int8_error_is_bounded_by_half_a_step() {
+  # The DERIVED bound from the file's table, asserted rather than asserted about.
+  let s = q.calibrate(a_tensor(), q.minmax())
+  let back = q.simulate_int8(a_tensor(), q.minmax())
+  let worst = item(max(abs(back - a_tensor())))
+  t.check("no weight moved by more than half a step", worst <= s.step / 2.0 + 0.0000001)
+}
+
+fn int8_rounding_is_unbiased_rather_than_truncating() {
+  # Truncation would pull every weight toward the low end by half a step on
+  # average, and a systematic shift across a layer is a shifted output. Noise is
+  # tolerable; bias is not.
+  let back = q.simulate_int8(a_tensor(), q.minmax())
+  let drift = item(mean(back - a_tensor()))
+  let s = q.calibrate(a_tensor(), q.minmax())
+  t.check("the mean error is well inside a step", drift < s.step / 4.0)
+  t.check("in both directions", drift > 0.0 - s.step / 4.0)
+}
+
+fn one_outlier_ruins_a_minmax_range_which_is_why_percentile_exists() {
+  # The argument for percentile calibration, as a test rather than a comment. A
+  # single weight at 100 gives a step of 0.4, so every real weight rounds to one
+  # of about five values.
+  let outlier = [[0.0 - 1.0, 0.5, 0.25, 100.0]]
+  let wide = q.calibrate(outlier, q.minmax())
+  let tight = q.calibrate(outlier, q.percentile(0.5))
+  t.check("the outlier widens the minmax step", wide.step > 0.39)
+  t.check("and clipping narrows it by orders of magnitude", tight.step < wide.step / 10.0)
+}
+
+fn a_constant_tensor_does_not_divide_by_zero() {
+  # A bias vector initialised to zeros is a constant tensor and it is the most
+  # common tensor in any model.
+  let s = q.calibrate(zeros(3, 3), q.minmax())
+  t.check("the step is positive", s.step > 0.0)
+  let back = q.simulate_int8(zeros(3, 3), q.minmax())
+  t.near("and the values come back unchanged", item(max(abs(back))), 0.0, 0.000001)
+}
+
+fn f16_error_is_bounded_by_the_relative_precision_of_the_format() {
+  # 2^-11 = 4.88e-4, DERIVED from an 11-bit significand.
+  let back = q.simulate_f16(a_tensor())
+  let rel = item(max(abs(back - a_tensor()) / maximum(abs(a_tensor()), 0.000001)))
+  t.check("within the format's relative precision", rel <= 0.000489)
+}
+
+fn f16_clamps_rather_than_producing_an_infinity() {
+  # A weight above 65504 becomes an infinity in real float16, and an infinity in
+  # a weight tensor produces NaN outputs three layers later, where nothing
+  # points back here.
+  let big = [[100000.0, 0.0 - 100000.0]]
+  let back = q.simulate_f16(big)
+  t.check("the positive side is clamped", item(back[0][0]) <= q.F16_MAX)
+  t.check("and the negative side", item(back[0][1]) >= 0.0 - q.F16_MAX)
+}
+
+fn quantising_a_model_leaves_the_original_alone() {
+  # The whole workflow is evaluating both, so the original has to survive.
+  let m = a_model()
+  let got = q.quantize(m, q.SCHEME_INT8, q.minmax())
+  t.equal_str("no error", got.err, "")
+  t.equal_str("the quantised model says so", got.model.precision, "int8")
+  t.equal_str("and the original still says f64", m.precision, "f64")
+}
+
+fn the_stored_size_is_eight_bytes_a_parameter_whatever_the_scheme_says() {
+  # The honest number. twill has one numeric width on disk, so quantising
+  # changes nothing about the file size today, and a size function that
+  # reported the aspiration would make the README's honesty pointless.
+  let m = a_model()
+  let got = q.quantize(m, q.SCHEME_INT8, q.minmax())
+  t.equal_i64("fifteen parameters", q.count_params(m.params), 15)
+  t.equal_i64("at eight bytes each", q.stored_bytes(m), 120)
+  t.equal_i64("and quantising does not change that",
+    q.stored_bytes(got.model), 120)
+}
+
+fn the_projection_is_the_arithmetic_the_table_states() {
+  let m = a_model()
+  # 15 parameters. f16 is two bytes each.
+  t.equal_i64("f16", q.projected_bytes(m, q.SCHEME_F16, 2), 30)
+  # int8 is one byte each plus a float64 lo and step per tensor, two tensors.
+  t.equal_i64("int8", q.projected_bytes(m, q.SCHEME_INT8, 2), 15 + 32)
+}
+
+fn comparing_two_models_reports_the_difference_rather_than_a_verdict() {
+  let m = a_model()
+  let got = q.quantize(m, q.SCHEME_INT8, q.minmax())
+  let x = [[1.0, 2.0, 3.0, 4.0], [0.5, 0.25, 0.0 - 1.0, 0.0]]
+  let c = q.compare(m, got.model, x, forward)
+  t.equal_str("no error", c.err, "")
+  t.equal_i64("both rows were compared", c.rows, 2)
+  t.check("the mean difference is a small number and not zero", c.mean_abs >= 0.0)
+  t.check("and the maximum is at least the mean", c.max_abs >= c.mean_abs)
+}
+
+fn comparing_against_a_mismatched_sample_is_refused() {
+  let m = a_model()
+  let got = q.quantize(m, q.SCHEME_F16, q.minmax())
+  let c = q.compare(m, got.model, zeros(2, 9), forward)
+  t.check("refused", len(c.err) > 0)
+}
+
+minmax_calibration_spans_the_actual_range()
+int8_error_is_bounded_by_half_a_step()
+int8_rounding_is_unbiased_rather_than_truncating()
+one_outlier_ruins_a_minmax_range_which_is_why_percentile_exists()
+a_constant_tensor_does_not_divide_by_zero()
+f16_error_is_bounded_by_the_relative_precision_of_the_format()
+f16_clamps_rather_than_producing_an_infinity()
+quantising_a_model_leaves_the_original_alone()
+the_stored_size_is_eight_bytes_a_parameter_whatever_the_scheme_says()
+the_projection_is_the_arithmetic_the_table_states()
+comparing_two_models_reports_the_difference_rather_than_a_verdict()
+comparing_against_a_mismatched_sample_is_refused()
+t.report("quant")

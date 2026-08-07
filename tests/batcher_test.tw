@@ -1,0 +1,145 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/signature.tw" as sg
+import "../src/model.tw" as md
+import "../src/batcher.tw" as bat
+import "../src/bytes_compat.tw" as b
+
+fn params() -> Tree {
+  { w: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+    b: [0.0, 0.0, 0.0] }
+}
+
+fn forward(p: Tree, x: Tensor) -> Tensor = x @ transpose(p.w) + p.b
+
+fn a_model() -> md.Model {
+  md.Model { params: params(), sig: sg.rows_of(4, 3, "logits"),
+             name: "toy", version: "toy@1.0.0", digest: "", architecture: "linear",
+             warmed: false, precision: "f64" }
+}
+
+fn row(v: F64) -> Tensor = [v, v, v, v]
+
+fn a_hold_of_zero_runs_every_request_alone() {
+  # The lowest-latency setting. Each request is its own pass, throughput is as
+  # bad as it gets, and that is the trade the operator chose.
+  let bt = bat.batcher(bat.config(8, 0))
+  let m = a_model()
+  bat.submit(bt, m, row(1.0))
+  t.check("ready immediately", bat.ready(bt))
+  let batch = bat.run(bt, m, forward)
+  t.equal_i64("one row in the pass", batch.rows, 1)
+  t.near("mean batch size is one", bat.mean_batch(bt), 1.0, 0.000001)
+}
+
+fn a_full_batch_runs_regardless_of_the_hold() {
+  let bt = bat.batcher(bat.config(4, 3))
+  let m = a_model()
+  let i: I64 = 0
+  while i < 3 {
+    bat.submit(bt, m, row(f64(i)))
+    i = i + 1
+  }
+  t.check("three of four is not ready on size", bat.pending(bt) == 3)
+  bat.submit(bt, m, row(3.0))
+  t.check("four of four is ready", bat.ready(bt))
+  let batch = bat.run(bt, m, forward)
+  t.equal_i64("four rows", batch.rows, 4)
+  t.equal_i64("in one pass", bt.passes, 1)
+}
+
+fn the_hold_expires_before_the_batch_fills() {
+  # The whole point of the latency knob. With max_batch 64 and max_hold 2, a
+  # request waits through two arrivals and then goes, rather than waiting for
+  # 61 more that may never come.
+  let bt = bat.batcher(bat.config(64, 2))
+  let m = a_model()
+  bat.submit(bt, m, row(1.0))
+  t.check("one alone does not expire the hold", not bat.ready(bt))
+  bat.submit(bt, m, row(2.0))
+  t.check("nor does two", not bat.ready(bt))
+  bat.submit(bt, m, row(3.0))
+  t.check("the third arrival expires it", bat.ready(bt))
+  let batch = bat.run(bt, m, forward)
+  t.equal_i64("three rows went, not sixty-four", batch.rows, 3)
+}
+
+fn the_output_rows_are_in_submission_order() {
+  # A caller matching outputs back to requests by index has no other way to do
+  # it, so order is the contract.
+  let bt = bat.batcher(bat.config(4, 3))
+  let m = a_model()
+  bat.submit(bt, m, row(1.0))
+  bat.submit(bt, m, row(2.0))
+  bat.submit(bt, m, row(3.0))
+  let batch = bat.flush(bt, m, forward)
+  t.equal_i64("three rows", batch.rows, 3)
+  t.near("first submitted is first out", item(batch.out[0][0]), 1.0, 0.000001)
+  t.near("second", item(batch.out[1][0]), 2.0, 0.000001)
+  t.near("third", item(batch.out[2][0]), 3.0, 0.000001)
+}
+
+fn a_malformed_request_is_refused_at_submit_and_not_at_run() {
+  # If a bad request reached the forward pass it would fail the whole batch, and
+  # every well-formed request queued with it would be refused for someone else's
+  # mistake.
+  let bt = bat.batcher(bat.config(4, 3))
+  let m = a_model()
+  bat.submit(bt, m, row(1.0))
+  let err = bat.submit(bt, m, [1.0, 2.0])
+  t.check("the bad one is refused", len(err) > 0)
+  t.equal_i64("and is not queued", bat.pending(bt), 1)
+  let batch = bat.flush(bt, m, forward)
+  t.equal_str("the good one still runs", batch.err, "")
+  t.equal_i64("alone", batch.rows, 1)
+  t.equal_i64("and the refusal is counted", bt.refused, 1)
+}
+
+fn flushing_an_empty_batcher_is_not_an_error() {
+  let bt = bat.batcher(bat.config(4, 3))
+  let batch = bat.flush(bt, a_model(), forward)
+  t.equal_str("no error", batch.err, "")
+  t.equal_i64("no rows", batch.rows, 0)
+  t.equal_i64("and no pass was run", bt.passes, 0)
+}
+
+fn a_hold_that_cannot_expire_is_reported_as_useless() {
+  # max_hold >= max_batch means the batch always fills first, so the latency
+  # knob does nothing and someone will spend an afternoon tuning it.
+  let err = bat.validate(bat.config(8, 8))
+  t.check("it is reported", len(err) > 0)
+  t.check("and the message says the hold never expires",
+    b.index_of(err, "never expires") >= 0)
+  t.equal_str("a sane pair is accepted", bat.validate(bat.config(8, 2)), "")
+}
+
+fn a_batch_size_below_one_is_refused() {
+  t.check("zero is refused", len(bat.validate(bat.config(0, 0))) > 0)
+  t.check("a negative hold is refused", len(bat.validate(bat.config(8, -1))) > 0)
+}
+
+fn the_report_states_the_configured_trade_and_the_realised_one() {
+  # A configured max_batch of 64 against a realised mean of 3 means the knobs
+  # are not doing anything, and the only way anyone notices is a number.
+  let bt = bat.batcher(bat.config(64, 1))
+  let m = a_model()
+  bat.submit(bt, m, row(1.0))
+  bat.submit(bt, m, row(2.0))
+  bat.run(bt, m, forward)
+  let r = bat.report(bt)
+  t.check("the configured max is in it", b.index_of(r, "64") >= 0)
+  t.check("and the realised mean", b.index_of(r, "mean") >= 0)
+  t.near("which is two", bat.mean_batch(bt), 2.0, 0.000001)
+}
+
+a_hold_of_zero_runs_every_request_alone()
+a_full_batch_runs_regardless_of_the_hold()
+the_hold_expires_before_the_batch_fills()
+the_output_rows_are_in_submission_order()
+a_malformed_request_is_refused_at_submit_and_not_at_run()
+flushing_an_empty_batcher_is_not_an_error()
+a_hold_that_cannot_expire_is_reported_as_useless()
+a_batch_size_below_one_is_refused()
+the_report_states_the_configured_trade_and_the_realised_one()
+t.report("batcher")

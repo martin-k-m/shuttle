@@ -1,0 +1,71 @@
+mode systems
+
+# A test harness, in twill.
+#
+# There is no test runner in the toolchain yet, so a test file is a program: it
+# calls these and `report` exits non-zero if anything failed. Primitive, and
+# enough to be a CI gate the day `mode systems` runs.
+#
+# This mirrors loom's and spool's tests/harness.tw deliberately, line for line.
+# Two conventions for the same job across one ecosystem is one too many. It is
+# also the third copy of this file, and docs/needs.md asks for the test runner
+# that would delete all three.
+#
+# Test names are written as sentences, because a failing test's name is the only
+# documentation anyone reads at the moment it fails.
+
+struct Counter {
+  passed: I64,
+  failed: I64,
+}
+
+let TESTS = Counter { passed: 0, failed: 0 }
+
+fn check(name: Str, ok: Bool) {
+  if ok {
+    TESTS.passed = TESTS.passed + 1
+  } else {
+    TESTS.failed = TESTS.failed + 1
+    print("FAIL " + name)
+  }
+}
+
+fn equal_str(name: Str, got: Str, want: Str) {
+  if got == want {
+    TESTS.passed = TESTS.passed + 1
+  } else {
+    TESTS.failed = TESTS.failed + 1
+    print("FAIL " + name)
+    print("  got:  " + got)
+    print("  want: " + want)
+  }
+}
+
+fn equal_i64(name: Str, got: I64, want: I64) {
+  equal_str(name, str(got), str(want))
+}
+
+# Floats are compared with a tolerance, and the tolerance is an argument rather
+# than a constant in here. A metric test wants 1e-9 and a cosine schedule test
+# wants 1e-6, and a single shared epsilon would be wrong for one of them.
+fn near(name: Str, got: F64, want: F64, tol: F64) {
+  let d = got - want
+  if d < 0.0 {
+    d = -d
+  }
+  if d <= tol {
+    TESTS.passed = TESTS.passed + 1
+  } else {
+    TESTS.failed = TESTS.failed + 1
+    print("FAIL " + name)
+    print("  got:  " + str(got))
+    print("  want: " + str(want) + " within " + str(tol))
+  }
+}
+
+fn report(suite: Str) {
+  print(suite + ": " + str(TESTS.passed) + " passed, " + str(TESTS.failed) + " failed")
+  if TESTS.failed > 0 {
+    exit(1)
+  }
+}

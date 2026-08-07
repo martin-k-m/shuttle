@@ -1,0 +1,189 @@
+mode systems
+
+# signature.tw: what a model takes, and refusing input that is not that.
+#
+# ---- why this file exists --------------------------------------------------
+#
+# twill's best property is that a shape mistake is an error you see before the
+# program runs. Serving gives that up: the input arrives at runtime, from a
+# file or a caller, and the checker never saw it. A served model is exactly the
+# place twill's guarantee does not reach.
+#
+# So it is rebuilt here, at the boundary, by hand. `check` compares an actual
+# tensor against a declared signature and produces a message in the same shape
+# and the same vocabulary as the checker's:
+#
+#   shape error: argument "x" axis 1 is 6 but the model expects 4
+#
+# rather than what happens without it, which is a matmul failing four calls deep
+# with the shapes of two intermediate tensors nobody named.
+#
+# The rule for the whole library: validation happens once, at the entry point,
+# against the declared signature. Nothing downstream re-checks, because a check
+# that runs in a loop is a check someone will remove for speed.
+#
+# ---- the free axis ---------------------------------------------------------
+#
+# A dimension of -1 is free, which in practice is the batch axis. -1 rather
+# than 0 matters: 0 is a legal dimension, an empty batch, and a signature that
+# spelled its free axis 0 would accept anything or nothing depending on which
+# way the comparison was written.
+
+import "bytes_compat.tw" as b
+
+let FREE: I64 = -1
+
+struct Signature {
+  # The shape of one request, including the batch axis. [-1, 4] is "any number
+  # of rows of 4 features".
+  input: Arr[I64],
+  output: Arr[I64],
+  # "logits", "probabilities", "regression". Not interpreted by the shape
+  # check. It is carried because the most common serving mistake is applying
+  # softmax to something that already had it applied, and this is the field that
+  # makes the mistake visible in a message rather than in a metric.
+  output_kind: Str,
+}
+
+fn signature(input: Arr[I64], output: Arr[I64], kind: Str) -> Signature {
+  Signature { input: input, output: output, output_kind: kind }
+}
+
+# The signature of a model that takes `features` per row and returns `classes`.
+# The common case, spelled once so that every caller's batch axis is free the
+# same way.
+fn rows_of(features: I64, classes: I64, kind: Str) -> Signature {
+  signature([FREE, features], [FREE, classes], kind)
+}
+
+fn shape_str(dims: Arr[I64]) -> Str {
+  let out = b.new()
+  b.push_text(out, "[")
+  let i: I64 = 0
+  while i < len(dims) {
+    if i > 0 {
+      b.push_text(out, ", ")
+    }
+    if dims[i] == FREE {
+      b.push_text(out, "_")
+    } else {
+      b.push_text(out, str(dims[i]))
+    }
+    i = i + 1
+  }
+  b.push_text(out, "]")
+  b.to_str(out)
+}
+
+# Check a tensor against a declared shape. Returns an empty string when it
+# matches, and a message naming the axis when it does not.
+#
+# The axis is named, not just the shapes. "expected [_, 4] and got [8, 6]" makes
+# a reader diff two lists; "axis 1 is 6 and the model expects 4" does not. For a
+# rank-4 image tensor the difference is the whole message.
+fn check(name: Str, actual: Tensor, want: Arr[I64]) -> Str {
+  let got = shape(actual)
+  if len(got) != len(want) {
+    return "shape error: " + name + " has rank " + str(len(got))
+      + " and the model expects rank " + str(len(want))
+      + " (" + shape_str(got) + " against " + shape_str(want) + ")"
+  }
+  let i: I64 = 0
+  while i < len(want) {
+    if want[i] != FREE and got[i] != want[i] {
+      return "shape error: " + name + " axis " + str(i) + " is " + str(got[i])
+        + " but the model expects " + str(want[i])
+        + " (" + shape_str(got) + " against " + shape_str(want) + ")"
+    }
+    i = i + 1
+  }
+  ""
+}
+
+# Check a batch of requests against the input shape.
+#
+# An empty batch is refused rather than passed through. A zero-row tensor
+# survives most of a forward pass and comes out the far end as a zero-row
+# output, and a prediction service that silently returns nothing for an empty
+# request is a service whose caller has a bug it cannot see.
+fn check_input(s: Signature, x: Tensor) -> Str {
+  if len(shape(x)) > 0 and shape(x)[0] == 0 {
+    return "shape error: the input has no rows, so there is nothing to predict"
+  }
+  check("the input", x, s.input)
+}
+
+# Check one request, which is one row without the batch axis.
+#
+# Written separately rather than by reshaping and calling check_input, because
+# the message has to talk about what the caller passed. Someone who handed in a
+# [4] vector should not be told about axis 1 of a [1, 4] tensor they never
+# built.
+fn check_one(s: Signature, x: Tensor) -> Str {
+  let want = row_shape(s)
+  let err = check("the input", x, want)
+  if len(err) == 0 {
+    return ""
+  }
+  # The overwhelmingly common version of this mistake is passing a batch to the
+  # single-input path, so it is diagnosed rather than left in the generic
+  # message.
+  if len(shape(x)) == len(s.input) {
+    return err + "; this looks like a batch, and predict_batch takes those"
+  }
+  err
+}
+
+# The input shape with the leading free axis removed.
+fn row_shape(s: Signature) -> Arr[I64] {
+  let out: Arr[I64] = []
+  let i: I64 = 1
+  while i < len(s.input) {
+    out = arr_push(out, s.input[i])
+    i = i + 1
+  }
+  out
+}
+
+# The number of rows a batch holds, or -1 if the input has no batch axis.
+fn batch_rows(s: Signature, x: Tensor) -> I64 {
+  if len(s.input) == 0 or len(shape(x)) == 0 {
+    return -1
+  }
+  shape(x)[0]
+}
+
+# Elements in one request, for the quantisation and batching code that needs a
+# size and not a shape. A free axis counts as 1: one request is one row.
+fn row_elements(s: Signature) -> I64 {
+  let n: I64 = 1
+  let i: I64 = 1
+  while i < len(s.input) {
+    if s.input[i] != FREE {
+      n = n * s.input[i]
+    }
+    i = i + 1
+  }
+  n
+}
+
+fn equal(a: Signature, x: Signature) -> Bool {
+  if a.output_kind != x.output_kind {
+    return false
+  }
+  dims_equal(a.input, x.input) and dims_equal(a.output, x.output)
+}
+
+fn dims_equal(a: Arr[I64], x: Arr[I64]) -> Bool {
+  if len(a) != len(x) {
+    return false
+  }
+  let i: I64 = 0
+  while i < len(a) {
+    if a[i] != x[i] {
+      return false
+    }
+    i = i + 1
+  }
+  true
+}

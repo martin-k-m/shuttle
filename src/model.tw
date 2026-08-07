@@ -1,0 +1,169 @@
+mode systems
+
+# model.tw: a model loaded and ready to answer.
+#
+# The forward function is passed in by the caller and shuttle never owns it.
+# That is the same decision loom made about the training step and it is made
+# here for the same reason: the thing that makes your model yours is the forward
+# pass, and a serving library that hid it inside itself would be a library you
+# had to fork to serve anything it did not anticipate.
+#
+# What shuttle owns is everything around the call: the signature check, the
+# batching, the warmup, the quantised parameters, and the counting.
+#
+# ---- loading ---------------------------------------------------------------
+#
+# Two ways in.
+#
+#   from_archive   a selvedge archive. The signature comes out of the file, so
+#                  the shape check is against what the model was published with
+#                  rather than against what the serving code believes.
+#   from_params    a bare `save`d parameter tree and a signature you declare.
+#                  Works, and the signature is now a claim rather than a fact.
+#                  Prefer the first.
+#
+# The difference is not stylistic. A declared signature that is wrong produces a
+# shape check that passes and a forward pass that fails, which is worse than no
+# check at all, because it moved the error later without removing it.
+
+import "signature.tw" as sg
+
+# Both of these reach sideways out of shuttle's own tree and into selvedge's.
+#
+# twill resolves a non-`std/` import as a path relative to the importing file,
+# and spool vendors every package as a sibling under `twill_modules/`, so from
+# `twill_modules/shuttle/src/model.tw` the way to selvedge is up two and across.
+# It works, and it hard-codes spool's layout into shuttle's source: a package
+# manager that vendored one level deeper would break this file and nothing else
+# in the ecosystem.
+#
+# There is no better spelling available. twill has no notion of a package name
+# in an import, so a dependency cannot be named, only located.
+# docs/needs.md entry 16.
+import "../../selvedge/src/archive.tw" as arc
+import "../../selvedge/src/manifest.tw" as mf
+
+struct Model {
+  params: Tree,
+  sig: sg.Signature,
+  # From the archive when there was one, otherwise what the caller said.
+  # Displayed in errors so that "which model produced this" is answerable from a
+  # log line.
+  name: Str,
+  version: Str,
+  # The content digest, empty for a model loaded from bare parameters. Present
+  # in every message shuttle prints about the model, because the one question a
+  # production incident always asks is which weights were running.
+  digest: Str,
+  architecture: Str,
+  # Set by src/warmup.tw. Read by predict only to report, never to decide: a
+  # prediction path that branched on whether warmup had run would have two
+  # behaviours and one of them would be untested.
+  warmed: Bool,
+  # How the parameters are stored. See src/quant.tw. Recorded here so that a
+  # log line says which precision answered.
+  precision: Str,
+}
+
+struct Loaded {
+  model: Model,
+  err: Str,
+}
+
+fn failed(msg: Str) -> Loaded {
+  Loaded {
+    model: Model { params: 0.0, sig: sg.signature([], [], ""), name: "",
+                   version: "", digest: "", architecture: "", warmed: false,
+                   precision: "f64" },
+    err: msg,
+  }
+}
+
+# Load from a selvedge archive, verifying its integrity first.
+#
+# Verified by default and not on request. A serving process is the last place in
+# the pipeline where anyone will look at the file, and a corrupt payload that
+# gets as far as a forward pass produces predictions rather than an error. Wrong
+# answers are the failure mode that does not page anyone.
+#
+# `read_unverified` is the escape hatch for a caller who has already verified
+# and does not want to hash 400 MB again on every restart. It is spelled long on
+# purpose.
+fn from_archive(path: Str) -> Loaded {
+  let integ = arc.verify(path)
+  if not arc.is_intact(integ) {
+    return failed("refusing to serve " + path + ": " + integ.detail)
+  }
+  read_unverified(path)
+}
+
+fn read_unverified(path: Str) -> Loaded {
+  let got = arc.read(path)
+  if len(got.err) > 0 {
+    return failed(got.err)
+  }
+  let man = got.arc.man
+  Loaded {
+    model: Model {
+      params: got.arc.params,
+      sig: sg.signature(man.sig.input, man.sig.output, man.sig.output_kind),
+      name: man.name,
+      version: mf.ref_str(man),
+      digest: man.digest,
+      architecture: man.architecture,
+      warmed: false,
+      precision: "f64",
+    },
+    err: "",
+  }
+}
+
+# Load a bare parameter tree written by `save`, with a signature the caller
+# declares.
+#
+# The signature is a claim here and shuttle cannot check it. That is stated at
+# the call site rather than buried: `from_archive` is the path where the
+# signature is a fact.
+fn from_params(path: Str, sig: sg.Signature, name: Str) -> Loaded {
+  let params = load(path)
+  Loaded {
+    model: Model {
+      params: params,
+      sig: sig,
+      name: name,
+      version: name,
+      digest: "",
+      architecture: "",
+      warmed: false,
+      precision: "f64",
+    },
+    err: "",
+  }
+}
+
+# A one-line identification, for logs and for error messages.
+#
+# The digest is in it. Six months from now the only question that matters about
+# a bad prediction is which weights produced it, and a log line naming a version
+# answers that only if nobody ever republished.
+fn describe(m: Model) -> Str {
+  let out = m.version
+  if len(m.digest) > 0 {
+    out = out + " (" + short(m.digest, 12) + ")"
+  }
+  out + " " + m.precision + ", input " + sg.shape_str(m.sig.input)
+    + " -> " + sg.shape_str(m.sig.output) + " " + m.sig.output_kind
+}
+
+fn short(s: Str, n: I64) -> Str {
+  if len(s) <= n {
+    return s
+  }
+  let out = bytes_new()
+  let i: I64 = 0
+  while i < n {
+    bytes_push(out, s[i])
+    i = i + 1
+  }
+  bytes_to_str(out)
+}

@@ -1,0 +1,242 @@
+mode systems
+
+# batcher.tw: trading latency for throughput, with the trade as a knob.
+#
+# ---- the decision this file refuses to make for you -----------------------
+#
+# Batching n requests into one forward pass is faster per request, because the
+# fixed cost of a pass is paid once and the matmuls get wider. It is also slower
+# for the first request in the batch, because that request waits for the others.
+#
+# That is not a tuning detail. It is the deciding question about a serving
+# system and its answer is different for a fraud check and for an overnight
+# scoring job, and neither answer is knowable from inside a library. So shuttle
+# does not have a heuristic. It has two numbers, both required, both with a
+# stated meaning:
+#
+#   max_batch   the most rows in one forward pass. This is the throughput knob.
+#               Larger is more throughput per row and more memory, up to the
+#               point where the batch stops fitting in cache and it is neither.
+#
+#   max_hold    the most arrivals a queued request will wait through before the
+#               batch runs anyway. This is the latency knob, and it is the one
+#               that is usually left implicit and should not be.
+#
+# `max_hold = 0` means never wait: every request runs alone, latency is as low
+# as it goes, throughput is as bad as it gets. `max_hold = max_batch - 1` means
+# always fill the batch. Everything useful is in between and where in between is
+# your decision, not shuttle's.
+#
+# ---- what a hold is measured in, and why it is not milliseconds -----------
+#
+# Every real dynamic batcher holds a batch for a duration: "up to 5ms". shuttle
+# cannot, because twill has no clock. `max_hold` counts arrivals instead.
+#
+# This is a worse knob and it is the honest one. Counting arrivals bounds the
+# wait in requests and not in time, so under a trickle of traffic a request can
+# wait indefinitely for the next one and the tail latency is unbounded.
+# `flush` exists for that, and calling it is the caller's job because only the
+# caller knows when its input is exhausted.
+#
+# The consequence, stated plainly rather than left to be discovered: **shuttle's
+# hold is safe for a bounded workload and unsafe for an open-ended stream of
+# requests.** Batch scoring a file is bounded. Anything driven by arrivals you
+# do not control is not. docs/needs.md entry 3 is the clock that fixes this, and
+# it is the first entry for a reason.
+#
+# ---- and there is no concurrency ------------------------------------------
+#
+# twill has no threads and no sockets, so nothing arrives while something else
+# is running. This is a batcher in the sense of accumulating work and cutting it
+# into passes of a chosen size, which is the part that matters for throughput.
+# It is not a batcher that overlaps waiting with computing, because there is
+# nothing to overlap with.
+
+import "signature.tw" as sg
+import "model.tw" as md
+import "predict.tw" as pr
+
+struct Config {
+  # Rows per forward pass. Throughput.
+  max_batch: I64,
+  # Arrivals a queued request waits through. Latency. See above for what this
+  # is not.
+  max_hold: I64,
+  # Run a batch as soon as it reaches this size even if the hold has not
+  # expired. Set equal to max_batch to disable, which is the default the
+  # constructor gives you.
+  min_batch: I64,
+}
+
+# The two numbers, both required. No default, deliberately: a default here would
+# be a heuristic wearing a constructor's clothes, and it would be wrong for one
+# of the two workloads this library is for.
+fn config(max_batch: I64, max_hold: I64) -> Config {
+  Config { max_batch: max_batch, max_hold: max_hold, min_batch: max_batch }
+}
+
+fn validate(c: Config) -> Str {
+  if c.max_batch < 1 {
+    return "max_batch must be at least 1, and " + str(c.max_batch) + " is not"
+  }
+  if c.max_hold < 0 {
+    return "max_hold cannot be negative, and " + str(c.max_hold) + " is"
+  }
+  if c.max_hold >= c.max_batch {
+    # Not an error, and worth saying. A hold longer than the batch can absorb
+    # never expires: the batch fills first, every time. The knob is then doing
+    # nothing and someone will spend an afternoon tuning it.
+    return "max_hold " + str(c.max_hold) + " is not below max_batch "
+      + str(c.max_batch) + ", so the hold never expires and only max_batch has"
+      + " any effect"
+  }
+  if c.min_batch < 1 or c.min_batch > c.max_batch {
+    return "min_batch must be between 1 and max_batch"
+  }
+  ""
+}
+
+struct Batcher {
+  cfg: Config,
+  # Queued rows, each already checked against the model's signature on the way
+  # in. Checking at submit rather than at run is what keeps a bad request from
+  # failing a batch of good ones.
+  queue: Arr[Tensor],
+  # Arrivals since the oldest queued row was submitted. The hold counter.
+  held: I64,
+  # Counters, for the report. A batcher whose effective batch size nobody
+  # measured is a batcher tuned by guesswork.
+  passes: I64,
+  rows: I64,
+  refused: I64,
+}
+
+fn batcher(c: Config) -> Batcher {
+  Batcher { cfg: c, queue: [], held: 0, passes: 0, rows: 0, refused: 0 }
+}
+
+# Queue one request. Returns an error string, empty on success.
+#
+# The signature check happens here, at submit, and not at run. A malformed
+# request that reached the forward pass would fail the whole batch, so every
+# well-formed request queued alongside it would be refused for someone else's
+# mistake.
+fn submit(bt: Batcher, m: md.Model, x: Tensor) -> Str {
+  let err = sg.check_one(m.sig, x)
+  if len(err) > 0 {
+    bt.refused = bt.refused + 1
+    return m.name + ": " + err
+  }
+  bt.queue = arr_push(bt.queue, x)
+  if len(bt.queue) > 1 {
+    bt.held = bt.held + 1
+  }
+  ""
+}
+
+# Whether a batch should run now.
+#
+# Three reasons, in this order, and the order is the policy: the batch is full,
+# the oldest request has waited its limit, or the batch has reached the size
+# below which a pass is not worth its fixed cost.
+fn ready(bt: Batcher) -> Bool {
+  if len(bt.queue) == 0 {
+    return false
+  }
+  if len(bt.queue) >= bt.cfg.max_batch {
+    return true
+  }
+  if bt.held >= bt.cfg.max_hold {
+    return true
+  }
+  len(bt.queue) >= bt.cfg.min_batch
+}
+
+struct Batch {
+  out: Tensor,
+  rows: I64,
+  err: Str,
+}
+
+# Run the queued rows as one forward pass and clear the queue.
+#
+# Returns the batch's output with one row per queued request, in submission
+# order. Order is part of the contract: a caller matching outputs back to
+# requests by index has no other way to do it, and a batcher that reordered for
+# any reason would break every caller silently.
+fn run(bt: Batcher, m: md.Model, forward: fn(Tree, Tensor) -> Tensor) -> Batch {
+  if len(bt.queue) == 0 {
+    return Batch { out: zeros(0), rows: 0, err: "" }
+  }
+  let n = len(bt.queue)
+  let x = stack_rows(bt.queue)
+  let p = pr.predict_batch(m, x, forward)
+  bt.queue = []
+  bt.held = 0
+  if len(p.err) > 0 {
+    return Batch { out: zeros(0), rows: 0, err: p.err }
+  }
+  bt.passes = bt.passes + 1
+  bt.rows = bt.rows + n
+  Batch { out: p.out, rows: n, err: "" }
+}
+
+# Run whatever is queued, regardless of the hold.
+#
+# The caller's responsibility and the caller's alone, because only the caller
+# knows its input is exhausted. Forgetting to call it is the way a batcher loses
+# the last few rows of a file, so it is named plainly and mentioned in the
+# README's limits.
+fn flush(bt: Batcher, m: md.Model, forward: fn(Tree, Tensor) -> Tensor) -> Batch {
+  run(bt, m, forward)
+}
+
+fn pending(bt: Batcher) -> I64 = len(bt.queue)
+
+# Rows per pass, over the batcher's life.
+#
+# The number that says whether the knobs are doing anything. A configured
+# max_batch of 64 with a mean of 3 means the hold is too short or the traffic is
+# too thin, and either way the memory reserved for 64 is not buying anything.
+fn mean_batch(bt: Batcher) -> F64 {
+  if bt.passes == 0 {
+    return 0.0
+  }
+  f64(bt.rows) / f64(bt.passes)
+}
+
+# One line describing the trade as configured and as realised.
+fn report(bt: Batcher) -> Str {
+  "batches " + str(bt.passes) + "  rows " + str(bt.rows)
+    + "  mean " + str(mean_batch(bt))
+    + "  configured max_batch " + str(bt.cfg.max_batch)
+    + " max_hold " + str(bt.cfg.max_hold)
+    + "  refused " + str(bt.refused)
+}
+
+# Queued rows as one batch tensor.
+#
+# Concatenates once, at the end, rather than as rows arrive. Growing a tensor by
+# concatenation per row is quadratic in the batch size and allocates the whole
+# batch again for every arrival, which for a max_batch of 256 is 256 allocations
+# of increasing size to build one.
+fn stack_rows(rows: Arr[Tensor]) -> Tensor {
+  let shaped: Arr[Tensor] = []
+  let i: I64 = 0
+  while i < len(rows) {
+    shaped = arr_push(shaped, as_row(rows[i]))
+    i = i + 1
+  }
+  concat(shaped, 0)
+}
+
+fn as_row(x: Tensor) -> Tensor {
+  let want: Arr[I64] = [1]
+  let s = shape(x)
+  let i: I64 = 0
+  while i < len(s) {
+    want = arr_push(want, s[i])
+    i = i + 1
+  }
+  reshape(x, want)
+}

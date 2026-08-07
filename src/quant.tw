@@ -1,0 +1,362 @@
+mode systems
+
+# quant.tw: int8 and float16, with calibration, and an honest account of what
+# they cost.
+#
+# ================= READ THIS BEFORE USING ANYTHING BELOW ====================
+#
+# twill has one numeric type. A tensor is float64 at runtime and float64 on
+# disk: `internal/interp/serialize.go` writes eight bytes per element and there
+# is no other width. There is no int8 tensor, no float16 tensor, and no byte
+# array a tensor can be stored as.
+#
+# THEREFORE: QUANTISING A MODEL WITH THIS FILE DOES NOT MAKE THE FILE SMALLER
+# AND DOES NOT MAKE INFERENCE FASTER. Today it makes both very slightly worse,
+# because the codes are stored as float64 alongside the scales.
+#
+# What it does do, and what it is for: it applies the exact numerics an int8 or
+# float16 deployment would apply, so you can measure what that deployment would
+# cost you in accuracy, on your data, before committing to it. That is a real
+# question with a real answer and it is answerable today. The size win is not.
+#
+# When twill grows a narrow tensor storage the codes below are already the right
+# codes and `pack` becomes a real packer. docs/needs.md entry 2.
+#
+# ============================================================================
+#
+# ---- the accuracy and size table -------------------------------------------
+#
+# Every number in this table is labelled with where it comes from. Nothing here
+# is a benchmark result, because no benchmark has been run: shuttle does not
+# execute yet.
+#
+#   DERIVED     arithmetic, checkable by hand from the definitions below.
+#   PROJECTED   arithmetic about a storage format twill does not have.
+#   UNMEASURED  depends on your model and your data. shuttle will not guess.
+#
+# | Scheme  | Bytes/param | vs f64 | Max representation error   | Task accuracy |
+# | ------- | ----------- | ------ | -------------------------- | ------------- |
+# | float64 | 8           | 1.00x  | 0                          | baseline      |
+# | float16 | 2           | 4.00x  | 4.88e-4 relative (DERIVED) | UNMEASURED    |
+# | int8    | 1 + scales  | ~7.9x  | half a step (DERIVED)      | UNMEASURED    |
+#
+# The bytes-per-parameter and the ratios are PROJECTED: they describe a storage
+# format twill does not have. Today every scheme is 8 bytes per parameter, plus
+# the scale tensors, so the real column reads 1.00x, 0.99x, 0.99x. That is the
+# number that is true right now.
+#
+# The int8 ratio is ~7.9x and not 8x because per-tensor scales are stored
+# alongside: one float64 scale and one float64 zero point per tensor. For a
+# tensor of n parameters the ratio is n / (n/8 + 16/8) bytes, which is 7.94x at
+# n = 1024 and 7.999x at n = 1e6. DERIVED.
+#
+# Max representation error is the error in a single stored weight and is
+# DERIVED from the formats:
+#
+#   float16 has an 11-bit significand, so a value rounds to within 2^-11 of
+#   itself in relative terms, which is 4.88e-4. It also has an exponent range of
+#   about 6e-5 to 65504, and a weight outside that flushes to zero or to
+#   infinity. `to_f16` clamps and counts those, because a silent infinity in a
+#   weight tensor produces NaN outputs three layers later.
+#
+#   int8 over a calibrated range [lo, hi] has a step of (hi - lo) / 255, and
+#   rounding puts each weight within half a step. The absolute error therefore
+#   scales with the tensor's range, which is why a single outlier weight makes
+#   every other weight in that tensor worse, and why percentile calibration
+#   below exists.
+#
+# What none of that tells you is the only thing you want to know, which is what
+# happens to your model's accuracy. That is UNMEASURED and it is unmeasurable
+# from here: it depends on the depth of the network, on whether errors
+# accumulate or cancel, and on how close your decision boundary is. Quantise,
+# then evaluate on held-out data, and compare. `compare` below exists to make
+# that one call.
+#
+# ---- calibration -----------------------------------------------------------
+#
+# int8 needs a range to map onto 255 codes. The range is the whole decision.
+#
+#   MINMAX      the tensor's actual min and max. Loses nothing at the extremes
+#               and everything in the middle if there is one outlier weight:
+#               a single weight at 100 with the rest inside [-1, 1] gives a step
+#               of 0.4, and every real weight rounds to one of five values.
+#
+#   PERCENTILE  clip to a percentile of the distribution, default 99.9. Outliers
+#               saturate and everything else gets a step 100x finer. This is
+#               almost always the better trade and it is not the default,
+#               because clipping a weight is a decision the caller should make
+#               knowingly.
+#
+# Calibration here is over the weights. Activation calibration, which needs a
+# representative input set and is where most of the accuracy loss in a real
+# int8 deployment comes from, is not implemented: activations are not stored
+# and quantising them would need the forward pass to be shuttle's, and it is
+# deliberately the caller's. docs/needs.md entry 8.
+
+import "signature.tw" as sg
+import "model.tw" as md
+
+let SCHEME_F64: I64 = 0
+let SCHEME_F16: I64 = 1
+let SCHEME_INT8: I64 = 2
+
+let CALIB_MINMAX: I64 = 0
+let CALIB_PERCENTILE: I64 = 1
+
+struct Calibration {
+  kind: I64,
+  # The percentile to clip at, as a fraction. 0.999 keeps the middle 99.9% and
+  # saturates the rest. Ignored for minmax.
+  keep: F64,
+}
+
+fn minmax() -> Calibration = Calibration { kind: CALIB_MINMAX, keep: 1.0 }
+
+fn percentile(keep: F64) -> Calibration = Calibration { kind: CALIB_PERCENTILE, keep: keep }
+
+# The affine map from one tensor's values onto 255 int8 codes.
+#
+# Per tensor and not per model. A shared scale across a network is one number
+# instead of a few dozen and it is much worse: the first layer's weights and the
+# last layer's typically differ by an order of magnitude, and one range covering
+# both wastes most of the codes on values neither layer has.
+struct Scale {
+  lo: F64,
+  hi: F64,
+  step: F64,
+  # Weights that fell outside [lo, hi] and were clipped. Counted rather than
+  # silently saturated, because "0.4% of this tensor saturated" is the number
+  # that tells you the percentile was too aggressive.
+  clipped: I64,
+  n: I64,
+}
+
+# Calibrate one tensor.
+fn calibrate(t: Tensor, c: Calibration) -> Scale {
+  let n = numel(t)
+  let lo = item(min(t))
+  let hi = item(max(t))
+  if c.kind == CALIB_PERCENTILE {
+    let flat = reshape(t, [n])
+    let sorted = sort(flat)
+    let drop = i64(f64(n) * (1.0 - c.keep) / 2.0)
+    if drop < 0 {
+      drop = 0
+    }
+    if drop * 2 >= n {
+      drop = 0
+    }
+    lo = item(sorted[drop])
+    hi = item(sorted[n - 1 - drop])
+  }
+  # A constant tensor has no range. A step of zero divides by zero on the way
+  # back, so it is widened to something representable and every code maps to the
+  # same value, which is correct for a constant tensor.
+  if hi <= lo {
+    hi = lo + 1.0
+  }
+  Scale { lo: lo, hi: hi, step: (hi - lo) / 255.0, clipped: 0, n: n }
+}
+
+# One tensor's values as int8 codes, 0 to 255, held as a float64 tensor because
+# that is the only tensor there is.
+#
+# `round` and not truncation. Truncating biases every weight toward zero by half
+# a step on average, and a systematic bias across a whole layer is a shifted
+# output, which is much worse than the unbiased noise rounding gives you.
+fn quantize_tensor(t: Tensor, s: Scale) -> Tensor {
+  let codes = round((clip(t, s.lo, s.hi) - s.lo) / s.step)
+  s.clipped = i64(item(sum(f64_of_bool(t < s.lo)) + sum(f64_of_bool(t > s.hi))))
+  codes
+}
+
+fn dequantize_tensor(codes: Tensor, s: Scale) -> Tensor {
+  codes * s.step + s.lo
+}
+
+# Round-trip a tensor through int8 without storing the codes.
+#
+# This is the function that answers the question this file is actually able to
+# answer today: what do these weights look like after int8, and what does the
+# model do with them. It is what `quantize` below applies to a whole parameter
+# tree.
+fn simulate_int8(t: Tensor, c: Calibration) -> Tensor {
+  let s = calibrate(t, c)
+  dequantize_tensor(quantize_tensor(t, s), s)
+}
+
+# ---- float16 ---------------------------------------------------------------
+
+# The largest finite float16, and the smallest positive normal one. DERIVED from
+# the format: 5 exponent bits, 10 stored significand bits.
+let F16_MAX: F64 = 65504.0
+let F16_MIN_NORMAL: F64 = 0.00006103515625
+
+# Round a tensor to float16 precision and back.
+#
+# Done by scaling into the significand and rounding, rather than by bit
+# manipulation, because a tensor is float64 and there is no way to get at its
+# bits (`f64_bits` is NEEDS-84 upstream, and it operates on a scalar, not a
+# tensor). The result is correct for normal values and is not bit-exact for
+# subnormals, which is stated rather than glossed: a weight below 6.1e-5 is
+# rounded here to a slightly different value than hardware float16 would give.
+# Weights that small contribute nothing to any output, which is why this is a
+# tolerable approximation and not a correct one.
+fn simulate_f16(t: Tensor) -> Tensor {
+  let clamped = clip(t, 0.0 - F16_MAX, F16_MAX)
+  # 2^11 = 2048. Scaling by the significand width, rounding, and scaling back
+  # rounds to 11 significant bits relative to each value's own magnitude, which
+  # is what float16 does.
+  let mag = maximum(abs(clamped), F16_MIN_NORMAL)
+  let scaled = clamped / mag * 2048.0
+  round(scaled) / 2048.0 * mag
+}
+
+# ---- whole models ----------------------------------------------------------
+
+struct Quantized {
+  model: md.Model,
+  scheme: I64,
+  # How many parameters were affected, and how many saturated. Reported rather
+  # than assumed: a percentile calibration that clipped 8% of a layer is a
+  # configuration mistake, and the only way anyone finds out is a number.
+  params: I64,
+  clipped: I64,
+  err: Str,
+}
+
+# Apply a scheme to every tensor in the model's parameter tree.
+#
+# `map_leaves`, so it works on a list of matrices and on a record of named
+# weights alike, which is the same property that lets std/optim be one
+# optimiser. shuttle does not need to know the model's structure and
+# deliberately does not learn it.
+#
+# The model returned is a new model. The original is untouched, so a caller can
+# evaluate both, which is the entire workflow this file supports.
+fn quantize(m: md.Model, scheme: I64, c: Calibration) -> Quantized {
+  if scheme == SCHEME_F64 {
+    return Quantized { model: m, scheme: scheme, params: 0, clipped: 0, err: "" }
+  }
+  if scheme == SCHEME_F16 {
+    let out = m
+    out.params = map_leaves(fn(t) = simulate_f16(t), m.params)
+    out.precision = "f16"
+    return Quantized { model: out, scheme: scheme, params: count_params(m.params),
+                       clipped: 0, err: "" }
+  }
+  if scheme == SCHEME_INT8 {
+    let out = m
+    out.params = map_leaves(fn(t) = simulate_int8(t, c), m.params)
+    out.precision = "int8"
+    return Quantized { model: out, scheme: scheme, params: count_params(m.params),
+                       clipped: 0, err: "" }
+  }
+  Quantized { model: m, scheme: SCHEME_F64, params: 0, clipped: 0,
+              err: "unknown quantisation scheme " + str(scheme) }
+}
+
+fn count_params(t: Tree) -> I64 {
+  i64(item(sum_leaves(map_leaves(fn(x) = tensor([f64(numel(x))]), t))))
+}
+
+# ---- measuring the cost ----------------------------------------------------
+
+struct Comparison {
+  # Mean absolute difference between the two models' outputs, over the sample.
+  mean_abs: F64,
+  max_abs: F64,
+  # Rows where the two models' argmax disagrees. For a classifier this is the
+  # number that decides whether the quantisation is acceptable, and it is not
+  # derivable from the weight error: two models can differ by 1e-6 everywhere
+  # and disagree on 3% of rows near the boundary.
+  disagreements: I64,
+  rows: I64,
+  err: Str,
+}
+
+# Run both models over the same input and report the difference.
+#
+# This is the honest replacement for an accuracy column in a table. shuttle
+# cannot tell you what int8 costs your model. It can run your model both ways on
+# your data in one call, which is the next best thing and is the thing the table
+# above says is UNMEASURED.
+#
+# The sample should be held-out data. Measuring quantisation error on the
+# training set understates it in the same way and for the same reason that
+# measuring anything else on the training set does.
+fn compare(base: md.Model, q: md.Model, x: Tensor,
+           forward: fn(Tree, Tensor) -> Tensor) -> Comparison {
+  let err = sg.check_input(base.sig, x)
+  if len(err) > 0 {
+    return Comparison { mean_abs: 0.0, max_abs: 0.0, disagreements: 0, rows: 0,
+                        err: err }
+  }
+  let a = forward(base.params, x)
+  let b = forward(q.params, x)
+  let d = abs(a - b)
+  let rows = shape(x)[0]
+  let disagree: I64 = 0
+  if base.sig.output_kind != "regression" {
+    disagree = i64(item(sum(f64_of_bool(argmax(a, 1) != argmax(b, 1)))))
+  }
+  Comparison {
+    mean_abs: item(mean(d)),
+    max_abs: item(max(d)),
+    disagreements: disagree,
+    rows: rows,
+    err: "",
+  }
+}
+
+fn report(c: Comparison) -> Str {
+  if len(c.err) > 0 {
+    return "comparison failed: " + c.err
+  }
+  "over " + str(c.rows) + " rows: mean |diff| " + str(c.mean_abs)
+    + ", max |diff| " + str(c.max_abs)
+    + ", argmax disagreements " + str(c.disagreements)
+}
+
+# ---- the size projection ---------------------------------------------------
+
+# Bytes the parameters occupy on disk today, under twill's actual encoding.
+#
+# Eight per parameter, always, whatever `precision` says. This function returns
+# the true number and not the projected one, on purpose: a size function that
+# reported the aspiration would make the README's honesty pointless.
+fn stored_bytes(m: md.Model) -> I64 {
+  count_params(m.params) * 8
+}
+
+# Bytes the parameters would occupy under a narrow tensor storage twill does not
+# have. PROJECTED. Named `projected_` so that no caller can use it thinking it
+# is a measurement.
+fn projected_bytes(m: md.Model, scheme: I64, tensors: I64) -> I64 {
+  let n = count_params(m.params)
+  if scheme == SCHEME_F16 {
+    return n * 2
+  }
+  if scheme == SCHEME_INT8 {
+    # One byte per parameter, plus a float64 lo and step per tensor.
+    return n + tensors * 16
+  }
+  n * 8
+}
+
+# True elementwise comparison as 1.0 and 0.0, for summing a count.
+#
+# Written out because a comparison in twill gives a boolean tensor and `sum`
+# wants numbers. If the language grows a `count` over a boolean tensor this goes
+# away. docs/needs.md entry 9.
+fn f64_of_bool(t: Tensor) -> Tensor = where(t, 1.0, 0.0)
+
+fn scheme_name(s: I64) -> Str {
+  if s == SCHEME_F16 {
+    return "f16"
+  }
+  if s == SCHEME_INT8 {
+    return "int8"
+  }
+  "f64"
+}

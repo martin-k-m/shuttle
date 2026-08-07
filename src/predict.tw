@@ -1,0 +1,203 @@
+mode systems
+
+# predict.tw: single, batched and streaming prediction.
+#
+# ---- the three shapes of request -------------------------------------------
+#
+# `predict`         one input, one output. The row is reshaped to a batch of
+#                   one and unwrapped on the way back, because a forward
+#                   function written for a batch should not need a second
+#                   version for a single row.
+# `predict_batch`   n inputs, n outputs, one forward pass.
+# `predict_stream`  an arbitrarily long input, cut into chunks of a fixed size,
+#                   with each chunk's output handed to a callback as it is
+#                   produced.
+#
+# The third is not the second with a loop around it, and the difference is the
+# reason it exists. `predict_batch` on a million rows materialises a million
+# rows of activations: every intermediate in the forward pass is a tensor as
+# tall as the input, so peak memory is the input times the widest layer rather
+# than the input. Streaming bounds that at the chunk size. It is slower per row
+# and it is the only one of the three that finishes.
+#
+# ---- validation happens once -----------------------------------------------
+#
+# Every entry point checks its input against the model's signature before
+# anything else, and nothing downstream re-checks. A check inside a loop is a
+# check someone removes for speed, and then the loop is unchecked.
+#
+# The check is what turns a matmul failing four calls deep into a message that
+# names the axis. See src/signature.tw for why that message is worth writing.
+
+import "signature.tw" as sg
+import "model.tw" as md
+
+struct Prediction {
+  out: Tensor,
+  err: Str,
+}
+
+fn refused(msg: Str) -> Prediction = Prediction { out: zeros(0), err: msg }
+
+# One input. The input is one row without the batch axis: a [4] vector for a
+# model declared [-1, 4].
+fn predict(m: md.Model, x: Tensor, forward: fn(Tree, Tensor) -> Tensor) -> Prediction {
+  let err = sg.check_one(m.sig, x)
+  if len(err) > 0 {
+    return refused(m.name + ": " + err)
+  }
+  let batched = as_batch_of_one(m, x)
+  let out = forward(m.params, batched)
+  let oerr = sg.check("the output", out, batch_output(m, 1))
+  if len(oerr) > 0 {
+    # The model's own output disagreeing with its declared signature is a
+    # different failure from a bad request, and it is the model's fault. It is
+    # reported rather than passed on, because a caller that trusted the declared
+    # output kind is about to interpret this wrongly.
+    return refused(m.name + ": the model returned an output its signature does not describe: " + oerr)
+  }
+  Prediction { out: unwrap_one(out), err: "" }
+}
+
+# n inputs, one forward pass.
+fn predict_batch(m: md.Model, x: Tensor, forward: fn(Tree, Tensor) -> Tensor) -> Prediction {
+  let err = sg.check_input(m.sig, x)
+  if len(err) > 0 {
+    return refused(m.name + ": " + err)
+  }
+  let rows = shape(x)[0]
+  let out = forward(m.params, x)
+  let oerr = sg.check("the output", out, batch_output(m, rows))
+  if len(oerr) > 0 {
+    return refused(m.name + ": the model returned an output its signature does not describe: " + oerr)
+  }
+  Prediction { out: out, err: "" }
+}
+
+# Predict over a long input in chunks, handing each chunk's output to `sink` as
+# it is produced.
+#
+# `sink` receives the output and the index of the first row it covers, so a
+# caller can write results out in order without holding them. It returns an
+# error string; a non-empty one stops the stream, which is what makes this
+# usable for "score until the output file is full" and for cancellation.
+#
+# Nothing is accumulated here. A streaming predictor that collected every chunk
+# and returned them at the end would be `predict_batch` with extra steps and the
+# same peak memory, which is the whole thing it exists to avoid.
+fn predict_stream(m: md.Model, x: Tensor, chunk: I64,
+                  forward: fn(Tree, Tensor) -> Tensor,
+                  sink: fn(Tensor, I64) -> Str) -> Str {
+  let err = sg.check_input(m.sig, x)
+  if len(err) > 0 {
+    return m.name + ": " + err
+  }
+  if chunk <= 0 {
+    return "a stream chunk size must be positive, and " + str(chunk) + " is not"
+  }
+  let rows = shape(x)[0]
+  let lo: I64 = 0
+  while lo < rows {
+    let hi = lo + chunk
+    if hi > rows {
+      hi = rows
+    }
+    let out = forward(m.params, x[lo:hi])
+    let oerr = sg.check("the output", out, batch_output(m, hi - lo))
+    if len(oerr) > 0 {
+      return m.name + ": at row " + str(lo)
+        + ", the model returned an output its signature does not describe: " + oerr
+    }
+    let serr = sink(out, lo)
+    if len(serr) > 0 {
+      return serr
+    }
+    lo = hi
+  }
+  ""
+}
+
+# ---- shape plumbing --------------------------------------------------------
+
+# A single row as a batch of one.
+#
+# `reshape` and not a wrapping literal, because the input can be rank 3 for an
+# image model and a literal would only handle the vector case. The target shape
+# is built from the signature rather than from the input, so a model whose free
+# axis is not axis 0 would be caught here rather than accepted.
+fn as_batch_of_one(m: md.Model, x: Tensor) -> Tensor {
+  let want: Arr[I64] = [1]
+  let i: I64 = 1
+  while i < len(m.sig.input) {
+    want = arr_push(want, m.sig.input[i])
+    i = i + 1
+  }
+  reshape(x, want)
+}
+
+fn unwrap_one(out: Tensor) -> Tensor {
+  let s = shape(out)
+  if len(s) == 0 {
+    return out
+  }
+  out[0]
+}
+
+# The output shape for a batch of `rows`, with the free axis resolved.
+#
+# Resolved rather than left free, because "the model returned 7 rows for a batch
+# of 8" is a real bug in a forward function that drops or duplicates a row, and
+# leaving the batch axis free is exactly what would let it through.
+fn batch_output(m: md.Model, rows: I64) -> Arr[I64] {
+  let want: Arr[I64] = []
+  let i: I64 = 0
+  while i < len(m.sig.output) {
+    if i == 0 and m.sig.output[i] == sg.FREE {
+      want = arr_push(want, rows)
+    } else {
+      want = arr_push(want, m.sig.output[i])
+    }
+    i = i + 1
+  }
+  want
+}
+
+# ---- interpreting an output ------------------------------------------------
+
+# The predicted class per row, for a classifier.
+#
+# Refuses a model whose output kind is a regression, rather than returning the
+# argmax of something that is not a class score. That is a real mistake someone
+# makes with a two-output regressor and it produces a plausible answer, which is
+# the kind of mistake worth a refusal.
+struct Labels {
+  idx: Tensor,
+  err: Str,
+}
+
+fn labels(m: md.Model, out: Tensor) -> Labels {
+  if m.sig.output_kind == "regression" {
+    return Labels { idx: zeros(0),
+      err: m.name + " returns a regression, so an argmax over its output is not a class" }
+  }
+  Labels { idx: argmax(out, 1), err: "" }
+}
+
+# Probabilities per row.
+#
+# The output kind decides whether softmax is applied, which is what that field
+# is for. Applying softmax to an output that is already probabilities is the
+# single most common serving mistake, it produces a flatter distribution rather
+# than an error, and the metric it moves is calibration, which nobody is
+# watching.
+fn probabilities(m: md.Model, out: Tensor) -> Labels {
+  if m.sig.output_kind == "probabilities" {
+    return Labels { idx: out, err: "" }
+  }
+  if m.sig.output_kind == "logits" {
+    return Labels { idx: softmax(out, 1), err: "" }
+  }
+  Labels { idx: zeros(0),
+    err: m.name + " declares its output as " + m.sig.output_kind
+      + ", which is not something probabilities can be derived from" }
+}

@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# shuttle cannot be run yet: it is written in twill's systems subset, which is
+# still being implemented. So CI gates on what is checkable today and says
+# plainly that it is not checking behaviour. When `mode systems` lands, the gate
+# becomes `twill run tests/*.tw` and these checks stay.
+#
+# The forbidden strings are assembled at runtime rather than written out, so
+# that this workflow does not fail its own checks.
+jobs:
+  source-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every source file is twill
+        run: |
+          stray=$(find . -path ./.git -prune -o -type f \
+            ! -name '*.tw' ! -name '*.md' ! -name '*.yml' ! -name '*.toml' \
+            ! -name 'LICENSE' ! -name '.gitignore' -print)
+          if [ -n "$stray" ]; then
+            echo "shuttle is written in twill; these files are neither .tw nor documentation:"
+            echo "$stray"
+            exit 1
+          fi
+
+      - name: No reference to the old language name
+        run: |
+          old=$(printf 'ras'; printf 'ter')
+          if grep -rni "$old" --include='*.tw' --include='*.md' --include='*.toml' .; then
+            echo "the language is twill"
+            exit 1
+          fi
+
+      - name: No file carries the old source extension
+        run: |
+          old=$(printf '*.r'; printf 'a')
+          if find . -name "$old" | grep .; then
+            echo "twill source is .tw"
+            exit 1
+          fi
+          if grep -rn "$(printf '\\.r'; printf 'a\\b')" --include='*.tw' --include='*.md' .; then
+            echo "twill source is .tw"
+            exit 1
+          fi
+
+      - name: No em dashes
+        run: |
+          dash=$(printf '\xe2\x80\x94')
+          if grep -rn "$dash" --include='*.tw' --include='*.md' --include='*.toml' .; then
+            echo "em dashes are not used in this repository"
+            exit 1
+          fi
+
+      - name: Every twill source declares its mode
+        run: |
+          for f in $(find . -name '*.tw'); do
+            if [ "$(head -n 1 "$f")" != "mode systems" ]; then
+              echo "$f does not start with 'mode systems'"
+              exit 1
+            fi
+          done
+
+      - name: The README does not claim shuttle works
+        run: |
+          grep -q 'shuttle does not run yet' README.md || {
+            echo "README.md must state that shuttle does not run yet"
+            exit 1
+          }
+
+      - name: Every needs entry names a file
+        run: |
+          # A needs entry without a file to look at is a wish, not a work item.
+          missing=$(grep -c '^### ' docs/needs.md)
+          named=$(grep -c '^\*\*\(Used by\|Would improve\|Needs\)' docs/needs.md)
+          if [ "$named" -lt "$missing" ]; then
+            echo "docs/needs.md has $missing entries and only $named name a file"
+            exit 1
+          fi
+
+
+  honesty-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The quantisation table is the one place in this repository where a
+      # plausible-looking number could be invented. Every figure in it carries a
+      # provenance label, and this job fails if the labels go missing, so
+      # deleting one is a visible act in a diff rather than an edit.
+      - name: Every figure in the quantisation table is labelled
+        run: |
+          for label in DERIVED PROJECTED UNMEASURED; do
+            grep -q "$label" src/quant.tw || {
+              echo "src/quant.tw no longer labels its figures $label"
+              echo "an unlabelled number in that table is a claim nobody derived"
+              exit 1
+            }
+            grep -q "$label" README.md || {
+              echo "README.md no longer labels its quantisation figures $label"
+              exit 1
+            }
+          done
+
+      # twill stores every tensor as float64, so quantising does not shrink a
+      # file today. If that ever stops being said out loud, the table above
+      # becomes a lie by omission.
+      - name: The quantisation size limit is stated plainly
+        run: |
+          grep -q 'DOES NOT MAKE THE FILE SMALLER' src/quant.tw || {
+            echo "src/quant.tw must state that quantising does not shrink a file today"
+            exit 1
+          }
+          grep -q 'does not make the file' README.md || {
+            echo "README.md must state that quantising does not shrink a file today"
+            exit 1
+          }
+
+      # The single most likely thing for a reader to assume and be wrong about.
+      - name: The absence of a network server is stated in the README
+        run: |
+          grep -q 'there is no network server' README.md || {
+            echo "README.md must state plainly that shuttle has no network server"
+            exit 1
+          }
+
+      - name: The batching hold says what it is measured in
+        run: |
+          grep -q 'counts arrivals' README.md || {
+            echo "README.md must state that max_hold counts arrivals and not milliseconds"
+            exit 1
+          }
+          grep -q 'not milliseconds' src/batcher.tw || {
+            echo "src/batcher.tw must state what the hold is measured in"
+            exit 1
+          }
+
+      - name: Warmup states what it does not cover
+        run: |
+          grep -q 'NOT COVERED' src/warmup.tw || {
+            echo "src/warmup.tw must list what warmup does not cover"
+            exit 1
+          }
+
+      # A default here would be a heuristic wearing a constructor's clothes, and
+      # it would be wrong for one of the two workloads this library is for.
+      - name: The batching knobs have no default
+        run: |
+          grep -q 'fn config(max_batch: I64, max_hold: I64)' src/batcher.tw || {
+            echo "src/batcher.tw config must require both numbers"
+            exit 1
+          }
