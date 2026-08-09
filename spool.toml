@@ -11,7 +11,7 @@ entry = "src/predict.tw"
 # The language itself, pinned to the release whose std modules and tensor
 # builtins this source was written against. spool has no notion of a toolchain
 # dependency, so it is declared as an ordinary git dependency.
-twill = { version = "^0.28.0", git = "https://github.com/martin-k-m/twill" }
+twill = { version = "^1.2.0", git = "https://github.com/martin-k-m/twill" }
 
 # Reading model archives. A real dependency and not a convenience: loading
 # through selvedge gets the model's declared input and output shapes out of the
