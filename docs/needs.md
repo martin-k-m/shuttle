@@ -206,15 +206,17 @@ widen the import rule; it is `std/bytes`.
 
 ### 11. twill's terminal layer, reachable from a package
 
-**Needs:** `src/term/` and `src/cli/progress.tw` available as `std/` modules
-**Used by:** `src/score.tw` (`Progress`), which would call them and does not
-**Status:** they exist, in the twill repository, as files.
+**Needs:** `src/term/` reachable from a package
+**Used by:** `src/score.tw` (`Progress`), which now calls it
+**Status:** RESOLVED for colour and capability detection.
 
-Same wall as entry 10 and as loom's entry 8. `src/score.tw` prints plain
-uncoloured lines with no bar and no width handling. Duplicating twill's progress
-bar here was the obvious alternative and was rejected for loom's reason: two
-progress bars in one ecosystem drift, and the drift is visible to users. Three
-would be worse.
+Resolved the same way as loom's entry 8: twill's terminal modules import each
+other by a path relative to the importer, so `src/score.tw` vendors the palette
+and capability detection under `twill_modules/` and lights its progress line,
+dropping to plain text the moment the output is piped. `src/cli/progress.tw`'s
+stateful bar is still not adopted, and the reason is unchanged: a second (or
+third) progress bar in the ecosystem drifts. shuttle keeps its own stateless
+line, now lit from the shared palette so it never drifts in colour.
 
 ## Not blocking, but the source is worse without them
 

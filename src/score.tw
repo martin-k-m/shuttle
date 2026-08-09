@@ -22,16 +22,21 @@ mode systems
 # it is worse in exactly the way loom's is, for the same missing primitive.
 # docs/needs.md entry 3.
 #
-# Progress goes to stdout as plain lines, uncoloured. twill has a terminal layer
-# with capability detection and a palette, in `src/term/`, and shuttle cannot
-# reach it: twill resolves a non-`std/` import as a path relative to the
-# importing file, so only `std/` modules are reachable from an installed
-# package. Same wall loom hit, same argument against duplicating the bar here,
-# same fix, which is `std/term`. docs/needs.md entry 11.
+# Progress goes to stdout, and it is lit now. twill's terminal layer became
+# reachable from a package once its modules began importing each other by a path
+# relative to the importer, so this file vendors it the same way loom and bobbin
+# do. Capabilities are detected once per reported line and every escape goes
+# through ansi.paint, which drops to plain text the moment the output is piped,
+# which is also the setting where `every` is 0 and nothing is reported at all.
+# The row count is lit and the label left quiet, so the number a person watches
+# climb is the thing that carries the line. docs/needs.md entry 11.
 
 import "signature.tw" as sg
 import "model.tw" as md
 import "predict.tw" as pr
+import "../twill_modules/twill/src/term/caps.tw" as cp
+import "../twill_modules/twill/src/term/ansi.tw" as ansi
+import "../twill_modules/twill/src/cli/theme.tw" as th
 
 struct Progress {
   # Report after this many rows. 0 reports nothing, which is the right setting
@@ -65,12 +70,20 @@ fn finish(p: Progress) {
   }
 }
 
+# The count and the percentage stay each in one painted run, so a substring
+# like "4/10" or "40%" is contiguous whether or not the terminal coloured it.
 fn line(p: Progress) -> Str {
+  let caps = cp.detect()
   if p.total <= 0 {
-    return p.label + " " + str(p.done) + " rows"
+    return ansi.paint(caps, th.muted(), p.label + " ")
+      + ansi.paint(caps, th.code(), str(p.done) + " rows")
   }
-  p.label + " " + str(p.done) + "/" + str(p.total)
-    + " (" + str(i64(f64(p.done) * 100.0 / f64(p.total))) + "%)"
+  let pct = i64(f64(p.done) * 100.0 / f64(p.total))
+  ansi.paint(caps, th.muted(), p.label + " ")
+    + ansi.paint(caps, th.code(), str(p.done) + "/" + str(p.total))
+    + ansi.paint(caps, th.muted(), " (")
+    + ansi.paint(caps, th.code(), str(pct) + "%")
+    + ansi.paint(caps, th.muted(), ")")
 }
 
 struct Score {

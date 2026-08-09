@@ -335,8 +335,10 @@ Collected, so none of them has to be discovered.
   numerics are exact; the bytes drop once raster NEEDS-111 and a narrow archive
   encoding land. Until then it measures what shrinking will cost.
 - **The input to `score_csv` is read whole.** Only the activations are chunked.
-- **No colour and no progress bar.** twill's terminal layer is not reachable
-  from an installed package; `docs/needs.md` entry 11.
+- **Lit progress lines, but no stateful bar.** The progress line is coloured
+  from twill's palette, vendored now that the terminal layer is reachable from a
+  package, and drops to plain text when piped. The rate-and-ETA bar from
+  `src/cli/progress.tw` is still not adopted; `docs/needs.md` entry 11.
 - **`flush` is the caller's job.** Forget it and the last partial batch is
   never run.
 
