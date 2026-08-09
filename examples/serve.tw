@@ -122,11 +122,18 @@ if len(scored.err) > 0 {
 
 # ---- what quantisation would cost ------------------------------------------
 #
-# Not what it saves. twill stores every tensor as float64, so quantising does
-# not shrink the file today and does not speed anything up. What it does is
-# apply the exact numerics int8 would apply, so the accuracy question can be
-# answered on your own held-out data instead of guessed at from a table.
+# The numerics are real: `.to(bf16)` and `.to(int8)` round exactly the way the
+# formats do, so the accuracy question is answered on your own held-out data
+# rather than guessed from a table. The bytes drop for real once the packed
+# buffer (raster NEEDS-111) and a narrow archive encoding land; until then a
+# narrow tensor rounds correctly and still fills eight-byte slots, which is why
+# the two size lines below take a `realised` flag and print both numbers.
 let held_out = read_csv("holdout.csv")
+
+# bf16 first: it keeps f32's range, so it is the safer default and the one to
+# reach for unless you have measured that f16's finer step buys you something.
+let as_bf16 = q.quantize(model, q.SCHEME_BF16, q.minmax())
+print("bf16: " + q.report(q.compare(model, as_bf16.model, held_out, forward)))
 
 let as_f16 = q.quantize(model, q.SCHEME_F16, q.minmax())
 print("f16:  " + q.report(q.compare(model, as_f16.model, held_out, forward)))
@@ -136,5 +143,7 @@ print("f16:  " + q.report(q.compare(model, as_f16.model, held_out, forward)))
 let as_int8 = q.quantize(model, q.SCHEME_INT8, q.percentile(0.999))
 print("int8: " + q.report(q.compare(model, as_int8.model, held_out, forward)))
 
-print("stored today:  " + str(q.stored_bytes(model)) + " bytes")
-print("int8 projected: " + str(q.projected_bytes(model, q.SCHEME_INT8, 4)) + " bytes")
+# Four tensors in this model. `realised: false` is the footprint today, true is
+# what it becomes once the storage lands.
+print("stored today:   " + str(q.stored_bytes(model, q.SCHEME_F64, 4, false)) + " bytes")
+print("int8 realised:  " + str(q.stored_bytes(model, q.SCHEME_INT8, 4, true)) + " bytes")

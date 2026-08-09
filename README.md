@@ -54,10 +54,10 @@ The layer between a trained model and the thing that uses it. loom trains,
 | Input validation against the model's declared shapes, with twill's kind of message | written, unrun |
 | Dynamic batching with the latency-throughput trade as two required numbers | written, unrun |
 | Warmup, with a written-out list of what it does and does not cover | written, unrun |
-| int8 and float16 with min-max and percentile calibration | written, unrun |
+| int8, float16 and bfloat16 with min-max and percentile calibration | written, unrun |
 | Batch scoring over a dataset, chunked, with progress | written, unrun |
 | Accuracy evaluation over a labelled dataset | written, unrun |
-| A quantisation size win | **not possible today.** See below |
+| A quantisation size win | **numerics real; bytes gated on raster NEEDS-111.** See below |
 | A progress time estimate | **not possible.** There is no clock |
 | A network server, a port, a socket, a request thread | **not possible, and not planned** |
 | Anything running end to end | **no** |
@@ -219,16 +219,20 @@ branch, which warms half the code.
 
 Read this before using `src/quant.tw`.
 
-**twill has one numeric type.** A tensor is float64 at runtime and float64 on
-disk. There is no int8 tensor, no float16 tensor, and no byte array a tensor can
-be stored as. Therefore **quantising a model with shuttle does not make the file
-smaller and does not make inference faster.** Today it makes both marginally
-worse, because the codes are stored as float64 alongside their scales.
+**twill now has narrow dtypes.** A tensor carries a dtype, `x.to(f16)` and
+`x.to(i8)` are correctly-rounded casts, and the conversions match the formats
+exactly, subnormals and overflow included. So **the numerics shuttle applies are
+real today**: quantising rounds the way an int8, f16 or bf16 deployment would,
+and you can measure the accuracy cost on your data before committing to it.
 
-What it does do is apply the exact numerics an int8 or float16 deployment would
-apply, so you can measure what that deployment would cost you in accuracy, on
-your data, before committing to it. That is a real question with a real answer
-and it is answerable today. The size win is not.
+**The bytes do not drop yet, and that is a gate rather than a fiction.** A narrow
+tensor holds narrow values but still occupies eight-byte slots until two things
+land upstream: the packed byte buffer that backs it (raster NEEDS-111, four
+native primitives) and a narrow on-disk encoding (a selvedge archive format
+bump). When they do, the ratios below are real and no code in `src/quant.tw`
+changes, because the rounding was always the hard half. Until then, `stored_bytes`
+with `realised: false` reports the true current footprint and with `true` the
+footprint after the gate clears; the default is never the aspiration.
 
 Every number below is labelled with where it comes from. Nothing here is a
 benchmark result, because shuttle does not execute.
@@ -236,21 +240,28 @@ benchmark result, because shuttle does not execute.
 | Scheme | Bytes/param | vs f64 | Max representation error | Task accuracy |
 | --- | --- | --- | --- | --- |
 | float64 | 8 | 1.00x | 0 | baseline |
+| bfloat16 | 2 | 4.00x | 3.9e-3 relative, DERIVED | **UNMEASURED** |
 | float16 | 2 | 4.00x | 4.88e-4 relative, DERIVED | **UNMEASURED** |
 | int8 | 1 + scales | ~7.9x | half a step, DERIVED | **UNMEASURED** |
 
-- **PROJECTED.** The bytes-per-parameter and the ratios describe a storage
-  format twill does not have. Today every scheme is 8 bytes per parameter, so
-  the column that is true right now reads 1.00x, 0.99x, 0.99x. `stored_bytes`
-  returns that true number; `projected_bytes` is named the way it is so nobody
-  can mistake it for a measurement.
+- **GATED, not PROJECTED.** The ratios are real once the two upstream pieces
+  named above land; the tensor already rounds to the dtype, so nothing but the
+  storage stands between here and the number. `stored_bytes(m, scheme, tensors,
+  realised)` returns the current footprint or the gated one by its last argument.
+- **DERIVED, bfloat16.** Seven stored significand bits round a value to within
+  2^-8, about 3.9e-3 relative. It keeps f32's eight exponent bits, so its range
+  is f32's and it does not overflow a value f32 could hold: no clamp, no loss
+  scaling. This is the safer 16-bit default.
 - **DERIVED, float16.** An 11-bit significand rounds a value to within 2^-11 of
-  itself, which is 4.88e-4 relative. Its range is about 6e-5 to 65504, and a
-  weight outside that flushes to zero or to infinity; shuttle clamps, because a
-  silent infinity in a weight tensor produces NaN outputs three layers later.
+  itself, which is 4.88e-4 relative, finer than bf16. Its range is only about
+  6e-5 to 65504, and a weight outside it flushes to zero or to infinity. shuttle
+  no longer hides that behind a clamp, because the cast is real: an f16 overflow
+  is a genuine hazard and the reason to prefer bf16 unless the finer step is
+  measured to pay.
 - **DERIVED, int8.** Over a calibrated range the step is `(hi - lo) / 255` and
-  rounding puts each weight within half a step. The `~7.9x` rather than `8x` is
-  the per-tensor scale and zero point: `n / (n/8 + 2)` bytes, which is 7.94x at
+  rounding puts each weight within half a step. The 256 levels are centred to a
+  real signed i8 tensor, one byte per code. The `~7.9x` rather than `8x` is the
+  per-tensor scale and zero point: `n / (n/8 + 2)` bytes, which is 7.94x at
   n = 1024 and 7.999x at n = 1e6.
 - **UNMEASURED.** What happens to your model's accuracy. It depends on the depth
   of the network, on whether the errors accumulate or cancel, and on how close
@@ -320,8 +331,9 @@ Collected, so none of them has to be discovered.
 - **No concurrency.** The batcher accumulates and cuts; it does not overlap.
 - **No clock.** The batching hold counts arrivals, warmup cannot report a
   saving, and progress has no estimate.
-- **Quantisation does not shrink anything today.** It measures what shrinking
-  would cost.
+- **Quantisation rounds for real but does not shrink the file yet.** The
+  numerics are exact; the bytes drop once raster NEEDS-111 and a narrow archive
+  encoding land. Until then it measures what shrinking will cost.
 - **The input to `score_csv` is read whole.** Only the activations are chunked.
 - **No colour and no progress bar.** twill's terminal layer is not reachable
   from an installed package; `docs/needs.md` entry 11.
@@ -348,7 +360,7 @@ src/model.tw          a loaded model, from an archive or from bare parameters
 src/predict.tw        single, batched and streaming prediction
 src/batcher.tw        the latency-throughput trade, as two required numbers
 src/warmup.tw         what it covers and what it does not
-src/quant.tw          int8 and float16, calibration, and an honest table
+src/quant.tw          int8, float16 and bfloat16, calibration, and an honest table
 src/score.tw          batch scoring, progress, and accuracy
 src/bytes_compat.tw   the one file that touches the subset's byte primitives
 tests/                tests, named as sentences

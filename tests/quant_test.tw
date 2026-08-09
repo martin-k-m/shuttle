@@ -84,14 +84,26 @@ fn f16_error_is_bounded_by_the_relative_precision_of_the_format() {
   t.check("within the format's relative precision", rel <= 0.000489)
 }
 
-fn f16_clamps_rather_than_producing_an_infinity() {
-  # A weight above 65504 becomes an infinity in real float16, and an infinity in
-  # a weight tensor produces NaN outputs three layers later, where nothing
-  # points back here.
+fn f16_overflows_to_infinity_above_its_range() {
+  # A weight above 65504 becomes an infinity in real float16, and the cast is
+  # real now, so shuttle no longer hides it behind a clamp. This is the hazard
+  # that makes f16 the riskier of the two 16-bit schemes and bf16 the safer
+  # default: an infinity in a weight tensor produces NaN outputs three layers
+  # later, where nothing points back here.
   let big = [[100000.0, 0.0 - 100000.0]]
   let back = q.simulate_f16(big)
-  t.check("the positive side is clamped", item(back[0][0]) <= q.F16_MAX)
-  t.check("and the negative side", item(back[0][1]) >= 0.0 - q.F16_MAX)
+  t.check("the positive side overflowed to +inf", item(back[0][0]) > 1e300)
+  t.check("and the negative side to -inf", item(back[0][1]) < 0.0 - 1e300)
+}
+
+fn bf16_keeps_f32s_range_so_the_same_weight_survives() {
+  # bf16 has f32's eight exponent bits, so 100000 is well inside its range and
+  # comes back finite where f16 overflowed. Coarser, but no infinity: this is
+  # the whole reason bf16 is the safer default for anything with large values.
+  let big = [[100000.0, 0.0 - 100000.0]]
+  let back = q.simulate_bf16(big)
+  t.check("the positive side stayed finite", item(back[0][0]) < 1e300)
+  t.check("and near the original", item(abs(back[0][0] - 100000.0)) < 1000.0)
 }
 
 fn quantising_a_model_leaves_the_original_alone() {
@@ -103,24 +115,29 @@ fn quantising_a_model_leaves_the_original_alone() {
   t.equal_str("and the original still says f64", m.precision, "f64")
 }
 
-fn the_stored_size_is_eight_bytes_a_parameter_whatever_the_scheme_says() {
-  # The honest number. twill has one numeric width on disk, so quantising
-  # changes nothing about the file size today, and a size function that
-  # reported the aspiration would make the README's honesty pointless.
+fn the_unrealised_size_is_eight_bytes_a_parameter_whatever_the_scheme_says() {
+  # The number that is true of the runtime as it stands: until the packed buffer
+  # and the narrow on-disk encoding land, a narrow tensor still fills eight-byte
+  # slots, so quantising changes nothing about the file size today. `realised:
+  # false` is how a caller asks for the current footprint rather than the future
+  # one, and a size function that reported the aspiration by default would make
+  # the README's honesty pointless.
   let m = a_model()
   let got = q.quantize(m, q.SCHEME_INT8, q.minmax())
   t.equal_i64("fifteen parameters", q.count_params(m.params), 15)
-  t.equal_i64("at eight bytes each", q.stored_bytes(m), 120)
-  t.equal_i64("and quantising does not change that",
-    q.stored_bytes(got.model), 120)
+  t.equal_i64("at eight bytes each", q.stored_bytes(m, q.SCHEME_F64, 2, false), 120)
+  t.equal_i64("and quantising does not change that today",
+    q.stored_bytes(got.model, q.SCHEME_INT8, 2, false), 120)
 }
 
-fn the_projection_is_the_arithmetic_the_table_states() {
+fn the_realised_size_is_the_arithmetic_the_table_states() {
   let m = a_model()
-  # 15 parameters. f16 is two bytes each.
-  t.equal_i64("f16", q.projected_bytes(m, q.SCHEME_F16, 2), 30)
+  # 15 parameters, two tensors, once the buffer and the encoding land.
+  # f16 and bf16 are two bytes each.
+  t.equal_i64("f16", q.stored_bytes(m, q.SCHEME_F16, 2, true), 30)
+  t.equal_i64("bf16", q.stored_bytes(m, q.SCHEME_BF16, 2, true), 30)
   # int8 is one byte each plus a float64 lo and step per tensor, two tensors.
-  t.equal_i64("int8", q.projected_bytes(m, q.SCHEME_INT8, 2), 15 + 32)
+  t.equal_i64("int8", q.stored_bytes(m, q.SCHEME_INT8, 2, true), 15 + 32)
 }
 
 fn comparing_two_models_reports_the_difference_rather_than_a_verdict() {
@@ -147,10 +164,11 @@ int8_rounding_is_unbiased_rather_than_truncating()
 one_outlier_ruins_a_minmax_range_which_is_why_percentile_exists()
 a_constant_tensor_does_not_divide_by_zero()
 f16_error_is_bounded_by_the_relative_precision_of_the_format()
-f16_clamps_rather_than_producing_an_infinity()
+f16_overflows_to_infinity_above_its_range()
+bf16_keeps_f32s_range_so_the_same_weight_survives()
 quantising_a_model_leaves_the_original_alone()
-the_stored_size_is_eight_bytes_a_parameter_whatever_the_scheme_says()
-the_projection_is_the_arithmetic_the_table_states()
+the_unrealised_size_is_eight_bytes_a_parameter_whatever_the_scheme_says()
+the_realised_size_is_the_arithmetic_the_table_states()
 comparing_two_models_reports_the_difference_rather_than_a_verdict()
 comparing_against_a_mismatched_sample_is_refused()
 t.report("quant")

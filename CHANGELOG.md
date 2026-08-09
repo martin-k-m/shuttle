@@ -26,9 +26,14 @@ Added:
   realised trade next to the configured one.
 - Warmup, at named batch shapes, with a written-out list of what it covers and
   what it does not, and a refusal to claim a saving there is no clock to measure.
-- int8 and float16 with min-max and percentile calibration, a size and accuracy
-  table where every figure is labelled DERIVED, PROJECTED or UNMEASURED, and a
-  `compare` that measures the accuracy cost on the caller's own held-out data.
+- int8, float16 and bfloat16 with min-max and percentile calibration, a size and
+  accuracy table where every figure is labelled DERIVED, GATED or UNMEASURED, and
+  a `compare` that measures the accuracy cost on the caller's own held-out data.
+  The numerics run on the language's real dtypes now: `.to(f16)` and `.to(bf16)`
+  are correctly-rounded casts rather than the earlier hand-rolled approximation,
+  int8 codes are centred into a real signed i8 tensor, and `stored_bytes` takes a
+  `realised` flag separating the footprint today from the one after the packed
+  buffer and a narrow archive encoding land upstream.
 - Batch scoring over a dataset, chunked so peak memory is one chunk's
   activations, with progress reporting and an accuracy evaluation.
 
@@ -37,6 +42,7 @@ Deliberately not included in v0.1, and in most cases not possible:
 - A network server, a port, or anything that listens. twill has no sockets.
 - Any overlap between waiting and computing. twill has no concurrency.
 - A progress time estimate or a warmup saving. twill has no clock.
-- A quantisation size win. twill stores every tensor as float64.
+- A quantisation size win yet. The dtypes round for real, but the bytes drop
+  only once raster NEEDS-111's packed buffer and a narrow archive encoding land.
 - Activation calibration. It would mean owning the forward pass, which shuttle
   deliberately does not.

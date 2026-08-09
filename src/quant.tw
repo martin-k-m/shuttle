@@ -1,26 +1,30 @@
 mode systems
 
-# quant.tw: int8 and float16, with calibration, and an honest account of what
-# they cost.
+# quant.tw: int8, float16 and bfloat16, with calibration, and an honest account
+# of what they cost.
 #
 # ================= READ THIS BEFORE USING ANYTHING BELOW ====================
 #
-# twill has one numeric type. A tensor is float64 at runtime and float64 on
-# disk: `internal/interp/serialize.go` writes eight bytes per element and there
-# is no other width. There is no int8 tensor, no float16 tensor, and no byte
-# array a tensor can be stored as.
+# twill now has narrow dtypes. `docs/dtypes.md` in the language repo designs
+# seven of them, `src/tensor.tw` there stores each tensor's elements rounded to
+# its dtype, and `x.to(f16)` is a correctly-rounded cast, not the manual
+# approximation an earlier version of this file carried. So the numerics below
+# are exact today: f16 and bf16 round the way the hardware would, subnormals
+# included, and int8 rounds over its calibrated range.
 #
-# THEREFORE: QUANTISING A MODEL WITH THIS FILE DOES NOT MAKE THE FILE SMALLER
-# AND DOES NOT MAKE INFERENCE FASTER. Today it makes both very slightly worse,
-# because the codes are stored as float64 alongside the scales.
+# The size win is designed and written but not yet realised end to end, and the
+# distinction is worth stating precisely rather than glossing. Two things
+# upstream gate the bytes actually dropping: the packed byte buffer that backs a
+# narrow tensor (raster NEEDS-111, four native primitives), and an on-disk
+# encoding that writes fewer than eight bytes per element (a selvedge archive
+# format bump, its own compatibility rule). Until both land, a narrow tensor
+# holds narrow VALUES in eight-byte slots, so this file rounds correctly and
+# saves nothing. When they land, the ratios below are real and no code here
+# changes, because the rounding was always the hard half.
 #
-# What it does do, and what it is for: it applies the exact numerics an int8 or
-# float16 deployment would apply, so you can measure what that deployment would
-# cost you in accuracy, on your data, before committing to it. That is a real
-# question with a real answer and it is answerable today. The size win is not.
-#
-# When twill grows a narrow tensor storage the codes below are already the right
-# codes and `pack` becomes a real packer. docs/needs.md entry 2.
+# What is answerable today, and is the whole point in the meantime: run your
+# model at f16, bf16 or int8 on your data and measure what the precision costs
+# you in accuracy, before committing to it. `compare` does that in one call.
 #
 # ============================================================================
 #
@@ -31,19 +35,31 @@ mode systems
 # execute yet.
 #
 #   DERIVED     arithmetic, checkable by hand from the definitions below.
-#   PROJECTED   arithmetic about a storage format twill does not have.
+#   GATED       real once raster NEEDS-111 and a selvedge format bump land; the
+#               rounding that earns it is exact today.
 #   UNMEASURED  depends on your model and your data. shuttle will not guess.
 #
-# | Scheme  | Bytes/param | vs f64 | Max representation error   | Task accuracy |
-# | ------- | ----------- | ------ | -------------------------- | ------------- |
-# | float64 | 8           | 1.00x  | 0                          | baseline      |
-# | float16 | 2           | 4.00x  | 4.88e-4 relative (DERIVED) | UNMEASURED    |
-# | int8    | 1 + scales  | ~7.9x  | half a step (DERIVED)      | UNMEASURED    |
+# | Scheme   | Bytes/param | vs f64 | Max representation error   | Task accuracy |
+# | -------- | ----------- | ------ | -------------------------- | ------------- |
+# | float64  | 8           | 1.00x  | 0                          | baseline      |
+# | bfloat16 | 2           | 4.00x  | 3.9e-3 relative (DERIVED)  | UNMEASURED    |
+# | float16  | 2           | 4.00x  | 4.88e-4 relative (DERIVED) | UNMEASURED    |
+# | int8     | 1 + scales  | ~7.9x  | half a step (DERIVED)      | UNMEASURED    |
 #
-# The bytes-per-parameter and the ratios are PROJECTED: they describe a storage
-# format twill does not have. Today every scheme is 8 bytes per parameter, plus
-# the scale tensors, so the real column reads 1.00x, 0.99x, 0.99x. That is the
-# number that is true right now.
+# The bytes-per-parameter are DERIVED from each dtype's width. The ratios are
+# GATED, not fictional: the tensor already rounds to the dtype, so the only
+# thing standing between here and the ratio is the packed buffer and the archive
+# format, both named above. `stored_bytes` returns the true number for the
+# runtime as it is now, and takes a flag for the number after the buffer lands,
+# so a caller is never handed the aspiration by accident.
+#
+# bf16 and f16 are the same width and not the same choice. bf16 keeps f32's
+# exponent, so its error is a coarser 3.9e-3 relative but it never overflows a
+# value f32 could hold and needs no loss scaling; f16 is finer at 4.88e-4 but
+# its range is roughly 6e-5 to 65504 and a weight outside it flushes to zero or
+# infinity. For weights, which cluster near zero, either is usually fine; for a
+# model with large activations, bf16 is the safer default. docs/dtypes.md sets
+# out the trade in full.
 #
 # The int8 ratio is ~7.9x and not 8x because per-tensor scales are stored
 # alongside: one float64 scale and one float64 zero point per tensor. For a
@@ -99,6 +115,7 @@ import "model.tw" as md
 let SCHEME_F64: I64 = 0
 let SCHEME_F16: I64 = 1
 let SCHEME_INT8: I64 = 2
+let SCHEME_BF16: I64 = 3
 
 let CALIB_MINMAX: I64 = 0
 let CALIB_PERCENTILE: I64 = 1
@@ -158,20 +175,26 @@ fn calibrate(t: Tensor, c: Calibration) -> Scale {
   Scale { lo: lo, hi: hi, step: (hi - lo) / 255.0, clipped: 0, n: n }
 }
 
-# One tensor's values as int8 codes, 0 to 255, held as a float64 tensor because
-# that is the only tensor there is.
+# One tensor's values as int8 codes, held in a real i8 tensor.
+#
+# The affine map produces 256 levels, 0 to 255. Those are centred to the signed
+# range -128 to 127 and stored with `.to(i8)`, so the codes occupy one byte each
+# in the packed buffer rather than eight: this is the packer NEEDS-111 makes
+# real, and the centring is the only thing that lets the language's signed i8
+# hold the whole 256-level range without losing an end. The values are integers
+# already in range, so the cast is exact and clamps nothing.
 #
 # `round` and not truncation. Truncating biases every weight toward zero by half
 # a step on average, and a systematic bias across a whole layer is a shifted
 # output, which is much worse than the unbiased noise rounding gives you.
 fn quantize_tensor(t: Tensor, s: Scale) -> Tensor {
-  let codes = round((clip(t, s.lo, s.hi) - s.lo) / s.step)
+  let level = round((clip(t, s.lo, s.hi) - s.lo) / s.step)
   s.clipped = i64(item(sum(f64_of_bool(t < s.lo)) + sum(f64_of_bool(t > s.hi))))
-  codes
+  (level - 128.0).to(i8)
 }
 
 fn dequantize_tensor(codes: Tensor, s: Scale) -> Tensor {
-  codes * s.step + s.lo
+  (codes.to(f64) + 128.0) * s.step + s.lo
 }
 
 # Round-trip a tensor through int8 without storing the codes.
@@ -185,32 +208,25 @@ fn simulate_int8(t: Tensor, c: Calibration) -> Tensor {
   dequantize_tensor(quantize_tensor(t, s), s)
 }
 
-# ---- float16 ---------------------------------------------------------------
+# ---- float16 and bfloat16 --------------------------------------------------
 
-# The largest finite float16, and the smallest positive normal one. DERIVED from
-# the format: 5 exponent bits, 10 stored significand bits.
-let F16_MAX: F64 = 65504.0
-let F16_MIN_NORMAL: F64 = 0.00006103515625
-
-# Round a tensor to float16 precision and back.
+# Round a tensor to float16 precision and back to f64.
 #
-# Done by scaling into the significand and rounding, rather than by bit
-# manipulation, because a tensor is float64 and there is no way to get at its
-# bits (`f64_bits` is NEEDS-84 upstream, and it operates on a scalar, not a
-# tensor). The result is correct for normal values and is not bit-exact for
-# subnormals, which is stated rather than glossed: a weight below 6.1e-5 is
-# rounded here to a slightly different value than hardware float16 would give.
-# Weights that small contribute nothing to any output, which is why this is a
-# tolerable approximation and not a correct one.
-fn simulate_f16(t: Tensor) -> Tensor {
-  let clamped = clip(t, 0.0 - F16_MAX, F16_MAX)
-  # 2^11 = 2048. Scaling by the significand width, rounding, and scaling back
-  # rounds to 11 significant bits relative to each value's own magnitude, which
-  # is what float16 does.
-  let mag = maximum(abs(clamped), F16_MIN_NORMAL)
-  let scaled = clamped / mag * 2048.0
-  round(scaled) / 2048.0 * mag
-}
+# One cast each way. `t.to(f16)` rounds every element to the nearest f16, the
+# language doing it through the correctly-rounded conversion in raster's
+# `src/float.tw`, and `.to(f64)` widens the result back for comparison against
+# the f64 baseline. This is exact, subnormals and the 65504 overflow edge
+# included, where the earlier hand-rolled version was a stated approximation:
+# the language grew the real conversion, so shuttle stopped faking it.
+#
+# For a servable model the second cast is dropped and the tensor is left at f16;
+# see `quantize`, which stores narrow rather than round-tripping.
+fn simulate_f16(t: Tensor) -> Tensor = t.to(f16).to(f64)
+
+# bfloat16, the same way. bf16 keeps f32's eight exponent bits, so it does not
+# have f16's overflow edge and does not need a clamp; its coarser mantissa is
+# the whole difference. docs/dtypes.md, "bf16 against f16, honestly".
+fn simulate_bf16(t: Tensor) -> Tensor = t.to(bf16).to(f64)
 
 # ---- whole models ----------------------------------------------------------
 
@@ -239,9 +255,20 @@ fn quantize(m: md.Model, scheme: I64, c: Calibration) -> Quantized {
     return Quantized { model: m, scheme: scheme, params: 0, clipped: 0, err: "" }
   }
   if scheme == SCHEME_F16 {
+    # `.to(f16)` and not `simulate_f16`: the stored model is left narrow, so it
+    # is the deployment rather than a measurement of it. The forward pass runs
+    # on f16 weights, which is what a served f16 model does, and a caller who
+    # wants the error compares this against the f64 original with `compare`.
     let out = m
-    out.params = map_leaves(fn(t) = simulate_f16(t), m.params)
+    out.params = map_leaves(fn(t) = t.to(f16), m.params)
     out.precision = "f16"
+    return Quantized { model: out, scheme: scheme, params: count_params(m.params),
+                       clipped: 0, err: "" }
+  }
+  if scheme == SCHEME_BF16 {
+    let out = m
+    out.params = map_leaves(fn(t) = t.to(bf16), m.params)
+    out.precision = "bf16"
     return Quantized { model: out, scheme: scheme, params: count_params(m.params),
                        clipped: 0, err: "" }
   }
@@ -318,30 +345,38 @@ fn report(c: Comparison) -> Str {
     + ", argmax disagreements " + str(c.disagreements)
 }
 
-# ---- the size projection ---------------------------------------------------
+# ---- the size accounting ---------------------------------------------------
 
-# Bytes the parameters occupy on disk today, under twill's actual encoding.
+# Bytes the parameters occupy, given a scheme and the number of tensors it was
+# applied over.
 #
-# Eight per parameter, always, whatever `precision` says. This function returns
-# the true number and not the projected one, on purpose: a size function that
-# reported the aspiration would make the README's honesty pointless.
-fn stored_bytes(m: md.Model) -> I64 {
-  count_params(m.params) * 8
-}
-
-# Bytes the parameters would occupy under a narrow tensor storage twill does not
-# have. PROJECTED. Named `projected_` so that no caller can use it thinking it
-# is a measurement.
-fn projected_bytes(m: md.Model, scheme: I64, tensors: I64) -> I64 {
-  let n = count_params(m.params)
-  if scheme == SCHEME_F16 {
-    return n * 2
+# `realised` is the honesty flag. False returns the number that is true of the
+# runtime as it stands: eight bytes per element whatever the dtype, because the
+# packed buffer (raster NEEDS-111) and the narrow on-disk encoding are not in
+# yet, so a narrow tensor still fills eight-byte slots. True returns the number
+# after both land, which is the dtype's real width. A caller reporting current
+# footprint passes false; one sizing a future deployment passes true; nobody is
+# handed the aspiration by leaving an argument off.
+fn scheme_width(scheme: I64) -> I64 {
+  if scheme == SCHEME_F16 or scheme == SCHEME_BF16 {
+    return 2
   }
   if scheme == SCHEME_INT8 {
-    # One byte per parameter, plus a float64 lo and step per tensor.
+    return 1
+  }
+  8
+}
+
+fn stored_bytes(m: md.Model, scheme: I64, tensors: I64, realised: Bool) -> I64 {
+  let n = count_params(m.params)
+  if not realised {
+    return n * 8
+  }
+  if scheme == SCHEME_INT8 {
+    # One byte per code, plus a float64 lo and step per tensor.
     return n + tensors * 16
   }
-  n * 8
+  n * scheme_width(scheme)
 }
 
 # True elementwise comparison as 1.0 and 0.0, for summing a count.
@@ -354,6 +389,9 @@ fn f64_of_bool(t: Tensor) -> Tensor = where(t, 1.0, 0.0)
 fn scheme_name(s: I64) -> Str {
   if s == SCHEME_F16 {
     return "f16"
+  }
+  if s == SCHEME_BF16 {
+    return "bf16"
   }
   if s == SCHEME_INT8 {
     return "int8"

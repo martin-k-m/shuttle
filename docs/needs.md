@@ -28,31 +28,37 @@ blocking is a work queue nobody reads.
 
 Nothing else on this list matters until this does.
 
-### 2. A narrow tensor storage: int8 and float16
+### 2. A narrow tensor storage: int8, float16 and bfloat16
 
 **Needs:** a tensor whose elements are stored in fewer than eight bytes, and an
 on-disk encoding for one
 **Used by:** `src/quant.tw`, the whole file
-**Status:** not designed anywhere. `internal/interp/serialize.go` writes eight
-bytes per element and there is no other width in the language.
+**Status:** half landed. The dtype semantics are in the language now:
+`docs/dtypes.md` in raster designs seven dtypes, `src/tensor.tw` stores each
+tensor's elements rounded to its dtype, `x.to(f16)` and `x.to(int8)` are
+correctly-rounded casts, and `src/quant.tw` was rewritten onto them. Two pieces
+are still missing before the bytes actually drop.
 
-This is the entry that changes what `src/quant.tw` is. Today quantising a model
-with shuttle does not make the file smaller and does not make inference faster,
-because the codes are stored as float64 alongside their scales. What it does is
-apply the exact numerics an int8 or float16 deployment would apply, so the
-accuracy cost is measurable before anyone commits to it. That is genuinely
-useful and it is half of what the file is named after.
+What landed changed what `src/quant.tw` is. The f16 path was a hand-rolled
+approximation that was wrong for subnormals; it is now one `.to(f16)` and exact.
+bf16 was added, the int8 codes are centred into a real signed i8 tensor rather
+than held as float64, and the accuracy cost of any of the three is measurable
+today with `compare`. That is the half of the file's name that now works end to
+end in principle.
 
-The size table in `src/quant.tw` marks every ratio as PROJECTED for this reason,
-and `stored_bytes` deliberately returns the true number rather than the
-aspiration.
+What is still missing, and gates the size win:
 
-The ask is narrower than "add int8 to the language". The codes are already
-computed correctly; what is missing is somewhere to put them. A `Bytes`-backed
-tensor with a scale, readable and writable through the existing save encoding as
-a new value tag, would close this entirely. It would also be a format change,
-which by selvedge's own compatibility rule means a new archive format version,
-and that is the right way round: the format is versioned so this can happen.
+  1. **The packed byte buffer.** raster NEEDS-111 names four native primitives
+     (`buf_new`, `buf_len`, `buf_get8`, `buf_set8`); the twill side of it is
+     written in raster's `src/buf.tw`. Until the runtime provides them, a narrow
+     tensor rounds correctly and still fills eight-byte slots.
+  2. **A narrow on-disk encoding.** The save format still writes eight bytes per
+     element. A `Buf`-backed tensor written through a new value tag closes this,
+     and by selvedge's compatibility rule that is a new archive format version,
+     which is the right way round: the format is versioned so this can happen.
+
+`stored_bytes` now takes a `realised` flag for exactly this gap: false is the
+true footprint today, true is the footprint once the two pieces above land.
 
 ### 3. A monotonic clock
 
