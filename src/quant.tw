@@ -189,7 +189,9 @@ fn calibrate(t: Tensor, c: Calibration) -> Scale {
 # output, which is much worse than the unbiased noise rounding gives you.
 fn quantize_tensor(t: Tensor, s: Scale) -> Tensor {
   let level = round((clip(t, s.lo, s.hi) - s.lo) / s.step)
-  s.clipped = i64(item(sum(f64_of_bool(t < s.lo)) + sum(f64_of_bool(t > s.hi))))
+  # `<` and `>` are scalar comparisons; the elementwise forms are `less` and
+  # `greater`, and each already yields a 0/1 tensor, so summing them counts.
+  s.clipped = i64(item(sum(less(t, s.lo)) + sum(greater(t, s.hi))))
   (level - 128.0).to(i8)
 }
 
@@ -283,8 +285,19 @@ fn quantize(m: md.Model, scheme: I64, c: Calibration) -> Quantized {
               err: "unknown quantisation scheme " + str(scheme) }
 }
 
+# `sum_leaves` does not exist; `map_leaves` is the only tree walk the language
+# offers, so the total is accumulated into a captured array as the walk visits
+# each leaf. Arrays are held by reference, which is what makes that work.
 fn count_params(t: Tree) -> I64 {
-  i64(item(sum_leaves(map_leaves(fn(x) = tensor([f64(numel(x))]), t))))
+  let total: Arr[I64] = []
+  push(total, 0)
+  map_leaves(fn(x) = tally(total, x), t)
+  total[0]
+}
+
+fn tally(total: Arr[I64], x: Tensor) -> Tensor {
+  total[0] = total[0] + numel(x)
+  x
 }
 
 # ---- measuring the cost ----------------------------------------------------

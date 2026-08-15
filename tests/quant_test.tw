@@ -15,7 +15,7 @@ import "../src/model.tw" as md
 import "../src/quant.tw" as q
 
 fn a_tensor() -> Tensor {
-  [[0.0 - 1.0, 0.0 - 0.5, 0.0, 0.5], [1.0, 0.25, 0.0 - 0.75, 0.125]]
+  [[-1.0, -0.5, 0.0, 0.5], [1.0, 0.25, -0.75, 0.125]]
 }
 
 fn params() -> Tree {
@@ -61,7 +61,7 @@ fn one_outlier_ruins_a_minmax_range_which_is_why_percentile_exists() {
   # The argument for percentile calibration, as a test rather than a comment. A
   # single weight at 100 gives a step of 0.4, so every real weight rounds to one
   # of about five values.
-  let outlier = [[0.0 - 1.0, 0.5, 0.25, 100.0]]
+  let outlier = [[-1.0, 0.5, 0.25, 100.0]]
   let wide = q.calibrate(outlier, q.minmax())
   let tight = q.calibrate(outlier, q.percentile(0.5))
   t.check("the outlier widens the minmax step", wide.step > 0.39)
@@ -90,7 +90,7 @@ fn f16_overflows_to_infinity_above_its_range() {
   # that makes f16 the riskier of the two 16-bit schemes and bf16 the safer
   # default: an infinity in a weight tensor produces NaN outputs three layers
   # later, where nothing points back here.
-  let big = [[100000.0, 0.0 - 100000.0]]
+  let big = [[100000.0, -100000.0]]
   let back = q.simulate_f16(big)
   t.check("the positive side overflowed to +inf", item(back[0][0]) > 1e300)
   t.check("and the negative side to -inf", item(back[0][1]) < 0.0 - 1e300)
