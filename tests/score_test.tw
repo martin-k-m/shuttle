@@ -25,7 +25,7 @@ fn a_dataset(rows: I64) -> Tensor {
   let parts: Arr[Tensor] = []
   let i: I64 = 0
   while i < rows {
-    let k = i - (i / 3) * 3
+    let k = i % 3
     if k == 0 {
       parts = arr_push(parts, [[1.0, 0.0, 0.0, 0.0]])
     }
@@ -44,7 +44,7 @@ fn a_label_vector(rows: I64) -> Tensor {
   let out: Arr[F64] = []
   let i: I64 = 0
   while i < rows {
-    out = arr_push(out, f64(i - (i / 3) * 3))
+    out = arr_push(out, f64(i % 3))
     i = i + 1
   }
   tensor(out)

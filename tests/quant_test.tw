@@ -100,7 +100,7 @@ fn bf16_keeps_f32s_range_so_the_same_weight_survives() {
   # bf16 has f32's eight exponent bits, so 100000 is well inside its range and
   # comes back finite where f16 overflowed. Coarser, but no infinity: this is
   # the whole reason bf16 is the safer default for anything with large values.
-  let big = [[100000.0, 0.0 - 100000.0]]
+  let big = [[100000.0, -100000.0]]
   let back = q.simulate_bf16(big)
   t.check("the positive side stayed finite", item(back[0][0]) < 1e300)
   t.check("and near the original", item(abs(back[0][0] - 100000.0)) < 1000.0)
@@ -143,7 +143,7 @@ fn the_realised_size_is_the_arithmetic_the_table_states() {
 fn comparing_two_models_reports_the_difference_rather_than_a_verdict() {
   let m = a_model()
   let got = q.quantize(m, q.SCHEME_INT8, q.minmax())
-  let x = [[1.0, 2.0, 3.0, 4.0], [0.5, 0.25, 0.0 - 1.0, 0.0]]
+  let x = [[1.0, 2.0, 3.0, 4.0], [0.5, 0.25, -1.0, 0.0]]
   let c = q.compare(m, got.model, x, forward)
   t.equal_str("no error", c.err, "")
   t.equal_i64("both rows were compared", c.rows, 2)

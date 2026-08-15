@@ -241,7 +241,9 @@ fn evaluate(m: md.Model, x: Tensor, y: Tensor, chunk: I64, p: Progress,
       err: "there are " + str(s.rows) + " predictions and " + str(shape(y)[0]) + " labels" }
   }
   let pred = argmax(s.out, 1)
-  let correct = i64(item(sum(where(pred == y, 1.0, 0.0))))
+  # `==` is a single deep-equality answer, not an elementwise mask; `equal` is
+  # the elementwise form and already yields a 0/1 tensor, so summing it counts.
+  let correct = i64(item(sum(equal(pred, y))))
   Evaluation {
     rows: s.rows,
     correct: correct,

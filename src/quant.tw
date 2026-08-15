@@ -261,23 +261,26 @@ fn quantize(m: md.Model, scheme: I64, c: Calibration) -> Quantized {
     # is the deployment rather than a measurement of it. The forward pass runs
     # on f16 weights, which is what a served f16 model does, and a caller who
     # wants the error compares this against the f64 original with `compare`.
-    let out = m
-    out.params = map_leaves(fn(t) = t.to(f16), m.params)
-    out.precision = "f16"
+    # `with_field` and not `let out = m`, which aliases: a record is a
+    # reference, so assigning through the copy narrowed the caller's model too
+    # and left them holding the quantised weights they asked to compare against.
+    let out = with_field(with_field(m, "params",
+      map_leaves(fn(t) = t.to(f16), m.params)), "precision", "f16")
     return Quantized { model: out, scheme: scheme, params: count_params(m.params),
                        clipped: 0, err: "" }
   }
   if scheme == SCHEME_BF16 {
-    let out = m
-    out.params = map_leaves(fn(t) = t.to(bf16), m.params)
-    out.precision = "bf16"
+    # `with_field` and not `let out = m`, which aliases: a record is a
+    # reference, so assigning through the copy narrowed the caller's model too
+    # and left them holding the quantised weights they asked to compare against.
+    let out = with_field(with_field(m, "params",
+      map_leaves(fn(t) = t.to(bf16), m.params)), "precision", "bf16")
     return Quantized { model: out, scheme: scheme, params: count_params(m.params),
                        clipped: 0, err: "" }
   }
   if scheme == SCHEME_INT8 {
-    let out = m
-    out.params = map_leaves(fn(t) = simulate_int8(t, c), m.params)
-    out.precision = "int8"
+    let out = with_field(with_field(m, "params",
+      map_leaves(fn(t) = simulate_int8(t, c), m.params)), "precision", "int8")
     return Quantized { model: out, scheme: scheme, params: count_params(m.params),
                        clipped: 0, err: "" }
   }
@@ -338,7 +341,12 @@ fn compare(base: md.Model, q: md.Model, x: Tensor,
   let rows = shape(x)[0]
   let disagree: I64 = 0
   if base.sig.output_kind != "regression" {
-    disagree = i64(item(sum(f64_of_bool(argmax(a, 1) != argmax(b, 1)))))
+    # `equal` and not `!=`: the operator gives one deep-equality answer for the
+    # whole tensor, and what is wanted is the count of rows that differ. `equal`
+    # is the elementwise form and already yields a 0/1 tensor, so the agreements
+    # sum directly and the disagreements are the rest.
+    let agree = i64(item(sum(equal(argmax(a, 1), argmax(b, 1)))))
+    disagree = rows - agree
   }
   Comparison {
     mean_abs: item(mean(d)),
@@ -394,11 +402,6 @@ fn stored_bytes(m: md.Model, scheme: I64, tensors: I64, realised: Bool) -> I64 {
 
 # True elementwise comparison as 1.0 and 0.0, for summing a count.
 #
-# Written out because a comparison in twill gives a boolean tensor and `sum`
-# wants numbers. If the language grows a `count` over a boolean tensor this goes
-# away. docs/needs.md entry 9.
-fn f64_of_bool(t: Tensor) -> Tensor = where(t, 1.0, 0.0)
-
 fn scheme_name(s: I64) -> Str {
   if s == SCHEME_F16 {
     return "f16"
