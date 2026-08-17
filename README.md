@@ -1,11 +1,11 @@
 <p align="center">
-  <img alt="twill" src="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-mark.png" width="120">
+  <img alt="twill" src="https://raw.githubusercontent.com/twill-lang/twill/main/assets/twill-mark.png" width="120">
 </p>
 
 <h1 align="center">shuttle</h1>
 
 <p align="center">
-  <b>Inference and serving for <a href="https://github.com/martin-k-m/twill">twill</a>.</b><br>
+  <b>Inference and serving for <a href="https://github.com/twill-lang/twill">twill</a>.</b><br>
   Written in twill.
 </p>
 
@@ -45,7 +45,7 @@ today.
 ## What shuttle is
 
 The layer between a trained model and the thing that uses it. loom trains,
-[selvedge](https://github.com/martin-k-m/selvedge) ships, shuttle answers.
+[selvedge](https://github.com/twill-lang/selvedge) ships, shuttle answers.
 
 | Piece | State |
 | --- | --- |
@@ -347,7 +347,7 @@ Collected, so none of them has to be discovered.
 Once spool and `mode systems` both work:
 
 ```
-spool add shuttle https://github.com/martin-k-m/shuttle
+spool add shuttle https://github.com/twill-lang/shuttle
 ```
 
 spool vendors into `twill_modules/`, and twill's import is a path, so the import
@@ -372,7 +372,7 @@ docs/needs.md         what the language still has to provide
 
 ## Dependencies
 
-twill, and [selvedge](https://github.com/martin-k-m/selvedge) for reading model
+twill, and [selvedge](https://github.com/twill-lang/selvedge) for reading model
 archives. Nothing else, and no Go.
 
 selvedge is a real dependency rather than a convenience: `from_archive` gets the
