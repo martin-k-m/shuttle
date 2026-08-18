@@ -228,7 +228,12 @@ with `realised: false` reports the true current footprint and with `true` the
 footprint after the gate clears; the default is never the aspiration.
 
 Every number below is labelled with where it comes from. Nothing here is a
-benchmark result, because shuttle does not execute.
+benchmark result: shuttle runs as of twill 1.6, but no benchmark has been run.
+
+**Quantising does not make the file smaller today.** twill stores every float as
+an f64 whatever dtype it carries, so rounding a weight to bfloat16 changes the
+value and not the eight bytes it sits in. The ratios below are what the file
+becomes once the packed storage lands.
 
 | Scheme | Bytes/param | vs f64 | Max representation error | Task accuracy |
 | --- | --- | --- | --- | --- |

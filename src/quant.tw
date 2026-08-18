@@ -39,6 +39,13 @@ mode systems
 #               rounding that earns it is exact today.
 #   UNMEASURED  depends on your model and your data. shuttle will not guess.
 #
+# QUANTISING DOES NOT MAKE THE FILE SMALLER TODAY. twill stores every float as
+# an f64 whatever dtype it carries, so rounding a weight to bfloat16 changes the
+# value and not the eight bytes it sits in. The ratios above are what the file
+# becomes when twill NEEDS-111's packed buffer and a selvedge format bump land;
+# until then quantising costs accuracy and buys nothing on disk, which is the
+# one thing a reader of this table must not have to work out for themselves.
+#
 # | Scheme   | Bytes/param | vs f64 | Max representation error   | Task accuracy |
 # | -------- | ----------- | ------ | -------------------------- | ------------- |
 # | float64  | 8           | 1.00x  | 0                          | baseline      |
