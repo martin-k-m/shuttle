@@ -88,7 +88,12 @@ jobs:
       # deleting one is a visible act in a diff rather than an edit.
       - name: Every figure in the quantisation table is labelled
         run: |
-          for label in DERIVED PROJECTED UNMEASURED; do
+          # The vocabulary is the one src/quant.tw actually defines. PROJECTED
+          # was in this list and in neither file: the table's own legend says
+          # "GATED, not PROJECTED", because a projection is a guess and a gated
+          # figure is arithmetic waiting on a storage change. This gate has been
+          # red since it was written, demanding the word the table refuses.
+          for label in DERIVED GATED UNMEASURED; do
             grep -q "$label" src/quant.tw || {
               echo "src/quant.tw no longer labels its figures $label"
               echo "an unlabelled number in that table is a claim nobody derived"
@@ -159,6 +164,15 @@ jobs:
             https://github.com/twill-lang/twill/releases/download/v1.6.0-rc2/twill-v1.6.0-rc2-linux-amd64
           chmod +x twill
           ./twill --version
+
+      # shuttle reads a model through selvedge's archive format, imported by a
+      # path relative to this repository. On a developer's machine the two sit
+      # side by side and it resolves; in CI only this repository is checked out,
+      # so the tests could not run at all until this step existed. It is a real
+      # dependency between two repositories and spool cannot vendor it yet, so
+      # it is cloned here and the workflow says why.
+      - name: Fetch selvedge, which shuttle imports
+        run: git clone --depth 1 https://github.com/twill-lang/selvedge ../selvedge
 
       - name: Check every source file
         run: |

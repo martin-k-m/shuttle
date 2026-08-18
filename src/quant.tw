@@ -31,8 +31,8 @@ mode systems
 # ---- the accuracy and size table -------------------------------------------
 #
 # Every number in this table is labelled with where it comes from. Nothing here
-# is a benchmark result, because no benchmark has been run: shuttle does not
-# execute yet.
+# is a benchmark result, because no benchmark has been run. shuttle executes as
+# of twill 1.6; what is still missing is the packed storage the ratios wait on.
 #
 #   DERIVED     arithmetic, checkable by hand from the definitions below.
 #   GATED       real once twill NEEDS-111 and a selvedge format bump land; the
