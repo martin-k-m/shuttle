@@ -9,7 +9,7 @@ mode systems
 
 import "harness.tw" as t
 import "../src/signature.tw" as sg
-import "../src/bytes_compat.tw" as b
+import "std/text" as tx
 
 fn sig() -> sg.Signature = sg.rows_of(4, 3, "logits")
 
@@ -25,9 +25,9 @@ fn any_batch_size_passes_because_the_batch_axis_is_free() {
 fn a_wrong_feature_count_names_the_axis_and_both_numbers() {
   let err = sg.check_input(sig(), zeros(8, 6))
   t.check("it is refused", len(err) > 0)
-  t.check("the axis is named", b.index_of(err, "axis 1") >= 0)
-  t.check("what was given is named", b.index_of(err, "is 6") >= 0)
-  t.check("what is expected is named", b.index_of(err, "expects 4") >= 0)
+  t.check("the axis is named", tx.find(err, "axis 1") >= 0)
+  t.check("what was given is named", tx.find(err, "is 6") >= 0)
+  t.check("what is expected is named", tx.find(err, "expects 4") >= 0)
 }
 
 fn a_wrong_rank_is_reported_as_a_rank_problem_and_not_an_axis_one() {
@@ -35,7 +35,7 @@ fn a_wrong_rank_is_reported_as_a_rank_problem_and_not_an_axis_one() {
   # axis the tensor does not have.
   let err = sg.check_input(sig(), zeros(4))
   t.check("it is refused", len(err) > 0)
-  t.check("and the message is about rank", b.index_of(err, "rank") >= 0)
+  t.check("and the message is about rank", tx.find(err, "rank") >= 0)
 }
 
 fn an_empty_batch_is_refused_rather_than_answered_with_nothing() {
@@ -44,7 +44,7 @@ fn an_empty_batch_is_refused_rather_than_answered_with_nothing() {
   # service whose caller has a bug it cannot see.
   let err = sg.check_input(sig(), zeros(0, 4))
   t.check("it is refused", len(err) > 0)
-  t.check("and the message says there are no rows", b.index_of(err, "no rows") >= 0)
+  t.check("and the message says there are no rows", tx.find(err, "no rows") >= 0)
 }
 
 fn a_single_row_passes_the_single_input_check() {
@@ -57,7 +57,7 @@ fn a_batch_passed_to_the_single_path_is_diagnosed_specifically() {
   let err = sg.check_one(sig(), zeros(8, 4))
   t.check("it is refused", len(err) > 0)
   t.check("and it says which function takes a batch",
-    b.index_of(err, "predict_batch") >= 0)
+    tx.find(err, "predict_batch") >= 0)
 }
 
 fn a_free_axis_prints_as_an_underscore_the_way_twill_writes_it() {
@@ -71,7 +71,7 @@ fn a_higher_rank_input_works_because_images_exist() {
   t.equal_str("a batch of images", sg.check_input(s, zeros(16, 1, 28, 28)), "")
   let err = sg.check_input(s, zeros(16, 1, 28, 32))
   t.check("a wrong width is refused", len(err) > 0)
-  t.check("and axis 3 is named", b.index_of(err, "axis 3") >= 0)
+  t.check("and axis 3 is named", tx.find(err, "axis 3") >= 0)
 }
 
 fn the_row_shape_drops_the_batch_axis() {

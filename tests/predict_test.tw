@@ -4,7 +4,7 @@ import "harness.tw" as t
 import "../src/signature.tw" as sg
 import "../src/model.tw" as md
 import "../src/predict.tw" as pr
-import "../src/bytes_compat.tw" as b
+import "std/text" as tx
 
 # A model whose forward pass is a matmul and a bias, so its outputs are
 # predictable by hand and a test can assert a number rather than a shape.
@@ -51,8 +51,8 @@ fn a_batch_prediction_keeps_the_batch_axis() {
 fn a_bad_request_is_refused_before_the_forward_pass() {
   let got = pr.predict_batch(a_model(), zeros(2, 6), forward)
   t.check("it is refused", len(got.err) > 0)
-  t.check("the model is named", b.index_of(got.err, "toy") >= 0)
-  t.check("and the axis is named", b.index_of(got.err, "axis 1") >= 0)
+  t.check("the model is named", tx.find(got.err, "toy") >= 0)
+  t.check("and the axis is named", tx.find(got.err, "axis 1") >= 0)
 }
 
 fn a_model_that_drops_rows_is_caught_rather_than_believed() {
@@ -62,7 +62,7 @@ fn a_model_that_drops_rows_is_caught_rather_than_believed() {
   let got = pr.predict_batch(a_model(), zeros(4, 4), dropping_forward)
   t.check("it is caught", len(got.err) > 0)
   t.check("and blamed on the model rather than the request",
-    b.index_of(got.err, "signature does not describe") >= 0)
+    tx.find(got.err, "signature does not describe") >= 0)
 }
 
 fn streaming_visits_every_row_once_in_order() {

@@ -27,6 +27,7 @@ mode systems
 # check at all, because it moved the error later without removing it.
 
 import "signature.tw" as sg
+import "std/text" as tx
 
 # Both of these reach sideways out of shuttle's own tree and into selvedge's.
 #
@@ -155,15 +156,11 @@ fn describe(m: Model) -> Str {
     + " -> " + sg.shape_str(m.sig.output) + " " + m.sig.output_kind
 }
 
+# The first `n` bytes of a digest. `tx.slice` clamps, so the length test is not
+# a guard against an out-of-range slice, only a way to avoid the copy.
 fn short(s: Str, n: I64) -> Str {
   if len(s) <= n {
     return s
   }
-  let out = bytes_new()
-  let i: I64 = 0
-  while i < n {
-    bytes_push(out, s[i])
-    i = i + 1
-  }
-  bytes_to_str(out)
+  tx.slice(s, 0, n)
 }

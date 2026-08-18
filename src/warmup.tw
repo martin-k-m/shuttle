@@ -70,6 +70,7 @@ mode systems
 
 import "signature.tw" as sg
 import "model.tw" as md
+import "std/text" as tx
 
 struct Warmup {
   # Batch sizes warmed, in the order run.
@@ -195,11 +196,12 @@ fn report(w: Warmup) -> Str {
   if len(w.err) > 0 {
     return "warmup failed: " + w.err
   }
-  let out = "warmed " + str(w.passes) + " pass(es) at batch sizes"
+  let out = bytes_new()
+  tx.push_str(out, "warmed " + str(w.passes) + " pass(es) at batch sizes")
   let i: I64 = 0
   while i < len(w.sizes) {
-    out = out + " " + str(w.sizes[i])
+    tx.push_str(out, " " + str(w.sizes[i]))
     i = i + 1
   }
-  out
+  bytes_to_str(out)
 }

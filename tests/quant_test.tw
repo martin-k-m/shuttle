@@ -109,7 +109,7 @@ fn bf16_keeps_f32s_range_so_the_same_weight_survives() {
 fn quantising_a_model_leaves_the_original_alone() {
   # The whole workflow is evaluating both, so the original has to survive.
   let m = a_model()
-  let got = q.quantize(m, q.SCHEME_INT8, q.minmax())
+  let got = q.quantize(m, q.Int8, q.minmax())
   t.equal_str("no error", got.err, "")
   t.equal_str("the quantised model says so", got.model.precision, "int8")
   t.equal_str("and the original still says f64", m.precision, "f64")
@@ -123,26 +123,26 @@ fn the_unrealised_size_is_eight_bytes_a_parameter_whatever_the_scheme_says() {
   # one, and a size function that reported the aspiration by default would make
   # the README's honesty pointless.
   let m = a_model()
-  let got = q.quantize(m, q.SCHEME_INT8, q.minmax())
+  let got = q.quantize(m, q.Int8, q.minmax())
   t.equal_i64("fifteen parameters", q.count_params(m.params), 15)
-  t.equal_i64("at eight bytes each", q.stored_bytes(m, q.SCHEME_F64, 2, false), 120)
+  t.equal_i64("at eight bytes each", q.stored_bytes(m, q.F64, 2, false), 120)
   t.equal_i64("and quantising does not change that today",
-    q.stored_bytes(got.model, q.SCHEME_INT8, 2, false), 120)
+    q.stored_bytes(got.model, q.Int8, 2, false), 120)
 }
 
 fn the_realised_size_is_the_arithmetic_the_table_states() {
   let m = a_model()
   # 15 parameters, two tensors, once the buffer and the encoding land.
   # f16 and bf16 are two bytes each.
-  t.equal_i64("f16", q.stored_bytes(m, q.SCHEME_F16, 2, true), 30)
-  t.equal_i64("bf16", q.stored_bytes(m, q.SCHEME_BF16, 2, true), 30)
+  t.equal_i64("f16", q.stored_bytes(m, q.F16, 2, true), 30)
+  t.equal_i64("bf16", q.stored_bytes(m, q.BF16, 2, true), 30)
   # int8 is one byte each plus a float64 lo and step per tensor, two tensors.
-  t.equal_i64("int8", q.stored_bytes(m, q.SCHEME_INT8, 2, true), 15 + 32)
+  t.equal_i64("int8", q.stored_bytes(m, q.Int8, 2, true), 15 + 32)
 }
 
 fn comparing_two_models_reports_the_difference_rather_than_a_verdict() {
   let m = a_model()
-  let got = q.quantize(m, q.SCHEME_INT8, q.minmax())
+  let got = q.quantize(m, q.Int8, q.minmax())
   let x = [[1.0, 2.0, 3.0, 4.0], [0.5, 0.25, -1.0, 0.0]]
   let c = q.compare(m, got.model, x, forward)
   t.equal_str("no error", c.err, "")
@@ -153,7 +153,7 @@ fn comparing_two_models_reports_the_difference_rather_than_a_verdict() {
 
 fn comparing_against_a_mismatched_sample_is_refused() {
   let m = a_model()
-  let got = q.quantize(m, q.SCHEME_F16, q.minmax())
+  let got = q.quantize(m, q.F16, q.minmax())
   let c = q.compare(m, got.model, zeros(2, 9), forward)
   t.check("refused", len(c.err) > 0)
 }

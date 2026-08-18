@@ -132,18 +132,18 @@ let held_out = read_csv("holdout.csv")
 
 # bf16 first: it keeps f32's range, so it is the safer default and the one to
 # reach for unless you have measured that f16's finer step buys you something.
-let as_bf16 = q.quantize(model, q.SCHEME_BF16, q.minmax())
+let as_bf16 = q.quantize(model, q.BF16, q.minmax())
 print("bf16: " + q.report(q.compare(model, as_bf16.model, held_out, forward)))
 
-let as_f16 = q.quantize(model, q.SCHEME_F16, q.minmax())
+let as_f16 = q.quantize(model, q.F16, q.minmax())
 print("f16:  " + q.report(q.compare(model, as_f16.model, held_out, forward)))
 
 # Percentile calibration, because one outlier weight in a tensor makes the step
 # coarse for every other weight in it.
-let as_int8 = q.quantize(model, q.SCHEME_INT8, q.percentile(0.999))
+let as_int8 = q.quantize(model, q.Int8, q.percentile(0.999))
 print("int8: " + q.report(q.compare(model, as_int8.model, held_out, forward)))
 
 # Four tensors in this model. `realised: false` is the footprint today, true is
 # what it becomes once the storage lands.
-print("stored today:   " + str(q.stored_bytes(model, q.SCHEME_F64, 4, false)) + " bytes")
-print("int8 realised:  " + str(q.stored_bytes(model, q.SCHEME_INT8, 4, true)) + " bytes")
+print("stored today:   " + str(q.stored_bytes(model, q.F64, 4, false)) + " bytes")
+print("int8 realised:  " + str(q.stored_bytes(model, q.Int8, 4, true)) + " bytes")

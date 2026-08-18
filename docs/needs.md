@@ -146,8 +146,14 @@ Systems mode makes annotations mandatory, so `Model` is currently undeclarable.
 `Labels`), `src/batcher.tw` (`Batch`), `src/warmup.tw` (`Warmup`),
 `src/quant.tw` (`Quantized`, `Comparison`), `src/score.tw` (`Score`,
 `Evaluation`)
-**Status:** `Res[T, E]` needs generics; multiple returns are not designed
-anywhere.
+**Status:** AVAILABLE in 1.6, and not yet taken up.
+
+1.6 shipped `Res[T, E]`, `Opt[T]` and postfix `?`, so the language side of this
+entry is closed. The nine structs are still here, because converting them
+changes every public return type in the repository at once and that is a
+release of its own rather than a tidy-up. The order to do it in is
+`src/model.tw` first, since `Loaded` is the one a caller meets before anything
+else works.
 
 Nine structs in this repository exist to return a value alongside an error
 string. Not one of them is a type anyone wanted; each is a tuple with a name and
@@ -196,13 +202,17 @@ will ever write, so it belongs in the language rather than in every library.
 ### 10. `std/bytes`
 
 **Needs:** the byte-level helpers as a `std/` module
-**Used by:** `src/bytes_compat.tw`, which is the third copy in the ecosystem
-**Status:** twill has `src/bytes.tw` and it is not reachable from a package.
+**Used by:** nothing, now
+**Status:** RESOLVED in 1.6.
 
-twill resolves a non-`std/` import as a path relative to the importing file, so
-only `std/` modules are reachable from an installed package. selvedge carries a
-copy, shuttle carries a copy, and twill's own is the original. The fix is not to
-widen the import rule; it is `std/bytes`.
+twill resolved it the way this entry asked, by making the helpers reachable
+rather than by widening the import rule: `bytes_new`, `bytes_push` and
+`bytes_to_str` are builtins, and `std/text` carries `push_str`, `find`,
+`slice`, `starts_with` and `join` with the same semantics the copy had.
+`src/bytes_compat.tw` is deleted and its callers import `std/text`. The one
+function with no `std/` equivalent, `push_hex_byte`, had no call sites left and
+went with it; a digest that needs hex again should ask for `std/hex` rather
+than start a fourth copy. selvedge's byte-identical copy can go the same way.
 
 ### 11. twill's terminal layer, reachable from a package
 
@@ -267,12 +277,14 @@ addition if it is not.
 ### 15. Temporary files, and cleaning up after a test
 
 **Would improve:** `tests/`
-**Status:** there is no `remove_file`.
+**Status:** RESOLVED in 1.6.
 
-shuttle's tests avoid the filesystem entirely, which is why this entry is last
-and short. It is here because the moment a test wants to exercise
-`md.from_archive` against a real file it hits selvedge's entry 15 as well, and
-neither repository can do anything about it.
+1.6 has `temp_dir(prefix)`, `remove_file`, `remove_all`, `mkdir_all` and the
+rest. Nothing in `tests/` changed for it, because shuttle's tests still touch
+the filesystem nowhere and so leave nothing behind. The entry is kept, marked
+resolved, because the constraint it recorded was real: a test that wants to
+exercise `md.from_archive` against a real file can now be written and cleaned
+up after.
 
 ### 16. An import that names a package rather than locating a file
 

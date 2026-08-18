@@ -29,8 +29,17 @@ mode systems
 # spelled its free axis 0 would accept anything or nothing depending on which
 # way the comparison was written.
 
-import "bytes_compat.tw" as b
+import "std/text" as tx
 
+# A free axis stays -1 rather than becoming `Opt[I64]`, and this is a decision
+# rather than an oversight. `shape_str` and `check` are handed a *declared*
+# shape and a *concrete* one from `shape(t)` interchangeably, and they can be
+# because the two share a representation. Making a declared dimension
+# `Opt[I64]` splits that representation, so `shape_str` becomes two functions,
+# `row_shape` stops being usable as a `want`, and every literal signature grows
+# from `[-1, 1, 28, 28]` to `[None, Some(1), Some(28), Some(28)]`. The -1 here
+# is a value in a public data model, documented above, not a workaround for a
+# missing type. docs/needs.md entry 14 asked for the wrong thing.
 let FREE: I64 = -1
 
 struct Signature {
@@ -57,22 +66,22 @@ fn rows_of(features: I64, classes: I64, kind: Str) -> Signature {
 }
 
 fn shape_str(dims: Arr[I64]) -> Str {
-  let out = b.new()
-  b.push_text(out, "[")
+  let out = bytes_new()
+  tx.push_str(out, "[")
   let i: I64 = 0
   while i < len(dims) {
     if i > 0 {
-      b.push_text(out, ", ")
+      tx.push_str(out, ", ")
     }
     if dims[i] == FREE {
-      b.push_text(out, "_")
+      tx.push_str(out, "_")
     } else {
-      b.push_text(out, str(dims[i]))
+      tx.push_str(out, str(dims[i]))
     }
     i = i + 1
   }
-  b.push_text(out, "]")
-  b.to_str(out)
+  tx.push_str(out, "]")
+  bytes_to_str(out)
 }
 
 # Check a tensor against a declared shape. Returns an empty string when it
@@ -145,12 +154,17 @@ fn row_shape(s: Signature) -> Arr[I64] {
   out
 }
 
-# The number of rows a batch holds, or -1 if the input has no batch axis.
-fn batch_rows(s: Signature, x: Tensor) -> I64 {
+# The number of rows a batch holds, or `None` if the input has no batch axis.
+#
+# `Opt` and not -1, unlike `FREE` above. This is not a dimension: it is an
+# answer that may not exist, and -1 here was out-of-band in a return that is
+# otherwise a count, so a caller who forgot to test it got a row count of -1 and
+# a loop that never ran. The checker now makes that caller say which it meant.
+fn batch_rows(s: Signature, x: Tensor) -> Opt[I64] {
   if len(s.input) == 0 or len(shape(x)) == 0 {
-    return -1
+    return None
   }
-  shape(x)[0]
+  Some(shape(x)[0])
 }
 
 # Elements in one request, for the quantisation and batching code that needs a

@@ -5,7 +5,7 @@ import "../src/signature.tw" as sg
 import "../src/model.tw" as md
 import "../src/score.tw" as sc
 import "../src/warmup.tw" as wu
-import "../src/bytes_compat.tw" as b
+import "std/text" as tx
 
 fn params() -> Tree {
   { w: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
@@ -80,7 +80,7 @@ fn a_short_final_chunk_is_scored_and_not_dropped() {
 fn a_bad_input_is_refused_before_anything_runs() {
   let got = sc.score(a_model(), zeros(10, 9), 4, sc.silent(), forward)
   t.check("refused", len(got.err) > 0)
-  t.check("and the model is named", b.index_of(got.err, "toy") >= 0)
+  t.check("and the model is named", tx.find(got.err, "toy") >= 0)
 }
 
 fn a_zero_chunk_size_is_refused() {
@@ -105,8 +105,8 @@ fn progress_counts_rows_and_reports_a_percentage() {
   let p = sc.progress(4, "scoring", 10)
   sc.advance(p, 4)
   t.equal_i64("four done", p.done, 4)
-  t.check("and the line carries the total", b.index_of(sc.line(p), "4/10") >= 0)
-  t.check("and a percentage", b.index_of(sc.line(p), "40%") >= 0)
+  t.check("and the line carries the total", tx.find(sc.line(p), "4/10") >= 0)
+  t.check("and a percentage", tx.find(sc.line(p), "40%") >= 0)
 }
 
 fn a_silent_progress_prints_nothing_and_still_counts() {
@@ -128,7 +128,7 @@ fn evaluate_counts_the_rows_the_model_got_right() {
 fn evaluate_refuses_a_label_vector_of_the_wrong_length() {
   let e = sc.evaluate(a_model(), a_dataset(9), a_label_vector(8), 4, sc.silent(), forward)
   t.check("refused", len(e.err) > 0)
-  t.check("with both counts", b.index_of(e.err, "9") >= 0)
+  t.check("with both counts", tx.find(e.err, "9") >= 0)
 }
 
 fn evaluate_refuses_a_regression_rather_than_inventing_a_tolerance() {
@@ -137,7 +137,7 @@ fn evaluate_refuses_a_regression_rather_than_inventing_a_tolerance() {
   let e = sc.evaluate(m, a_dataset(3), a_label_vector(3), 4, sc.silent(), forward)
   t.check("refused", len(e.err) > 0)
   t.check("and it says to pick an error measure",
-    b.index_of(e.err, "error measure") >= 0)
+    tx.find(e.err, "error measure") >= 0)
 }
 
 fn warmup_runs_the_shapes_it_was_asked_for_and_says_which() {
@@ -158,7 +158,7 @@ fn warming_nothing_is_refused_rather_than_quietly_doing_nothing() {
 fn warming_with_real_rows_refuses_a_sample_that_is_too_small() {
   let w = wu.warm_with(a_model(), a_dataset(4), [8], forward)
   t.check("refused", len(w.err) > 0)
-  t.check("and it says how many rows there were", b.index_of(w.err, "4") >= 0)
+  t.check("and it says how many rows there were", tx.find(w.err, "4") >= 0)
 }
 
 scoring_covers_every_row_in_order()

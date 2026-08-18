@@ -4,7 +4,7 @@ import "harness.tw" as t
 import "../src/signature.tw" as sg
 import "../src/model.tw" as md
 import "../src/batcher.tw" as bat
-import "../src/bytes_compat.tw" as b
+import "std/text" as tx
 
 fn params() -> Tree {
   { w: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
@@ -110,7 +110,7 @@ fn a_hold_that_cannot_expire_is_reported_as_useless() {
   let err = bat.validate(bat.config(8, 8))
   t.check("it is reported", len(err) > 0)
   t.check("and the message says the hold never expires",
-    b.index_of(err, "never expires") >= 0)
+    tx.find(err, "never expires") >= 0)
   t.equal_str("a sane pair is accepted", bat.validate(bat.config(8, 2)), "")
 }
 
@@ -128,8 +128,8 @@ fn the_report_states_the_configured_trade_and_the_realised_one() {
   bat.submit(bt, m, row(2.0))
   bat.run(bt, m, forward)
   let r = bat.report(bt)
-  t.check("the configured max is in it", b.index_of(r, "64") >= 0)
-  t.check("and the realised mean", b.index_of(r, "mean") >= 0)
+  t.check("the configured max is in it", tx.find(r, "64") >= 0)
+  t.check("and the realised mean", tx.find(r, "mean") >= 0)
   t.near("which is two", bat.mean_batch(bt), 2.0, 0.000001)
 }
 

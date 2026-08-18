@@ -364,7 +364,6 @@ src/batcher.tw        the latency-throughput trade, as two required numbers
 src/warmup.tw         what it covers and what it does not
 src/quant.tw          int8, float16 and bfloat16, calibration, and an honest table
 src/score.tw          batch scoring, progress, and accuracy
-src/bytes_compat.tw   the one file that touches the subset's byte primitives
 tests/                tests, named as sentences
 examples/serve.tw     load, warm, predict, batch, score, compare
 docs/needs.md         what the language still has to provide

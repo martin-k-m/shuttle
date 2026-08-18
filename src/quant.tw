@@ -112,24 +112,32 @@ mode systems
 import "signature.tw" as sg
 import "model.tw" as md
 
-let SCHEME_F64: I64 = 0
-let SCHEME_F16: I64 = 1
-let SCHEME_INT8: I64 = 2
-let SCHEME_BF16: I64 = 3
+# The four schemes, as a type rather than four integers.
+#
+# Nothing serialises this. A quantised model records what it is in
+# `Model.precision`, which is a `Str` and is what selvedge writes, so the tags
+# below have no on-disk representation to keep stable and could be renamed
+# freely. `scheme_name` is the one boundary between the two spellings and is
+# where the archive's string is produced.
+#
+# What the enum buys, concretely: `quantize` used to end in an "unknown
+# quantisation scheme 7" branch that no correct caller could reach and every
+# reader had to consider. That branch is gone, because there is no seventh
+# scheme to pass.
+enum Scheme { F64, F16, Int8, BF16 }
 
-let CALIB_MINMAX: I64 = 0
-let CALIB_PERCENTILE: I64 = 1
+enum Calib { MinMax, Percentile }
 
 struct Calibration {
-  kind: I64,
+  kind: Calib,
   # The percentile to clip at, as a fraction. 0.999 keeps the middle 99.9% and
   # saturates the rest. Ignored for minmax.
   keep: F64,
 }
 
-fn minmax() -> Calibration = Calibration { kind: CALIB_MINMAX, keep: 1.0 }
+fn minmax() -> Calibration = Calibration { kind: MinMax, keep: 1.0 }
 
-fn percentile(keep: F64) -> Calibration = Calibration { kind: CALIB_PERCENTILE, keep: keep }
+fn percentile(keep: F64) -> Calibration = Calibration { kind: Percentile, keep: keep }
 
 # The affine map from one tensor's values onto 255 int8 codes.
 #
@@ -148,24 +156,46 @@ struct Scale {
   n: I64,
 }
 
+# The two ends of a calibrated range. A struct because a `match` arm is one
+# expression and this one has two numbers to give back.
+struct Range {
+  lo: F64,
+  hi: F64,
+}
+
+fn minmax_range(t: Tensor) -> Range = Range { lo: item(min(t)), hi: item(max(t)) }
+
+# The range with `keep` of the distribution inside it, trimmed symmetrically.
+#
+# A `keep` that would trim away the whole tensor falls back to the full range
+# rather than producing an empty one. Sorting is O(n log n) over the tensor and
+# is the reason percentile calibration costs more than minmax.
+fn percentile_range(t: Tensor, keep: F64, n: I64) -> Range {
+  let sorted = sort(reshape(t, [n]))
+  let drop = i64(f64(n) * (1.0 - keep) / 2.0)
+  if drop < 0 {
+    drop = 0
+  }
+  if drop * 2 >= n {
+    drop = 0
+  }
+  Range { lo: item(sorted[drop]), hi: item(sorted[n - 1 - drop]) }
+}
+
 # Calibrate one tensor.
+#
+# The two modes are now two arms of one `match` rather than a default followed
+# by an `if` that overwrites it. That is the same answer and it reads as the
+# choice it is, and adding a third calibration mode makes this line report
+# itself instead of silently taking the minmax branch.
 fn calibrate(t: Tensor, c: Calibration) -> Scale {
   let n = numel(t)
-  let lo = item(min(t))
-  let hi = item(max(t))
-  if c.kind == CALIB_PERCENTILE {
-    let flat = reshape(t, [n])
-    let sorted = sort(flat)
-    let drop = i64(f64(n) * (1.0 - c.keep) / 2.0)
-    if drop < 0 {
-      drop = 0
-    }
-    if drop * 2 >= n {
-      drop = 0
-    }
-    lo = item(sorted[drop])
-    hi = item(sorted[n - 1 - drop])
+  let r = match c.kind {
+    MinMax => minmax_range(t),
+    Percentile => percentile_range(t, c.keep, n),
   }
+  let lo = r.lo
+  let hi = r.hi
   # A constant tensor has no range. A step of zero divides by zero on the way
   # back, so it is widened to something representable and every code maps to the
   # same value, which is correct for a constant tensor.
@@ -234,7 +264,7 @@ fn simulate_bf16(t: Tensor) -> Tensor = t.to(bf16).to(f64)
 
 struct Quantized {
   model: md.Model,
-  scheme: I64,
+  scheme: Scheme,
   # How many parameters were affected, and how many saturated. Reported rather
   # than assumed: a percentile calibration that clipped 8% of a layer is a
   # configuration mistake, and the only way anyone finds out is a number.
@@ -252,40 +282,35 @@ struct Quantized {
 #
 # The model returned is a new model. The original is untouched, so a caller can
 # evaluate both, which is the entire workflow this file supports.
-fn quantize(m: md.Model, scheme: I64, c: Calibration) -> Quantized {
-  if scheme == SCHEME_F64 {
+# `.to(f16)` and not `simulate_f16`: the stored model is left narrow, so it is
+# the deployment rather than a measurement of it. The forward pass runs on f16
+# weights, which is what a served f16 model does, and a caller who wants the
+# error compares this against the f64 original with `compare`.
+#
+# f64 returns the tree it was given. That arm is never reached through
+# `quantize`, which returns the untouched model before it gets here, and it is
+# written out rather than folded into a `_` because a `_` in a dispatch is the
+# thing that stops the checker naming a fifth scheme.
+fn narrow(t: Tree, scheme: Scheme, c: Calibration) -> Tree {
+  match scheme {
+    F64 => t,
+    F16 => map_leaves(fn(x) = x.to(f16), t),
+    BF16 => map_leaves(fn(x) = x.to(bf16), t),
+    Int8 => map_leaves(fn(x) = simulate_int8(x, c), t),
+  }
+}
+
+fn quantize(m: md.Model, scheme: Scheme, c: Calibration) -> Quantized {
+  if scheme == F64 {
     return Quantized { model: m, scheme: scheme, params: 0, clipped: 0, err: "" }
   }
-  if scheme == SCHEME_F16 {
-    # `.to(f16)` and not `simulate_f16`: the stored model is left narrow, so it
-    # is the deployment rather than a measurement of it. The forward pass runs
-    # on f16 weights, which is what a served f16 model does, and a caller who
-    # wants the error compares this against the f64 original with `compare`.
-    # `with_field` and not `let out = m`, which aliases: a record is a
-    # reference, so assigning through the copy narrowed the caller's model too
-    # and left them holding the quantised weights they asked to compare against.
-    let out = with_field(with_field(m, "params",
-      map_leaves(fn(t) = t.to(f16), m.params)), "precision", "f16")
-    return Quantized { model: out, scheme: scheme, params: count_params(m.params),
-                       clipped: 0, err: "" }
-  }
-  if scheme == SCHEME_BF16 {
-    # `with_field` and not `let out = m`, which aliases: a record is a
-    # reference, so assigning through the copy narrowed the caller's model too
-    # and left them holding the quantised weights they asked to compare against.
-    let out = with_field(with_field(m, "params",
-      map_leaves(fn(t) = t.to(bf16), m.params)), "precision", "bf16")
-    return Quantized { model: out, scheme: scheme, params: count_params(m.params),
-                       clipped: 0, err: "" }
-  }
-  if scheme == SCHEME_INT8 {
-    let out = with_field(with_field(m, "params",
-      map_leaves(fn(t) = simulate_int8(t, c), m.params)), "precision", "int8")
-    return Quantized { model: out, scheme: scheme, params: count_params(m.params),
-                       clipped: 0, err: "" }
-  }
-  Quantized { model: m, scheme: SCHEME_F64, params: 0, clipped: 0,
-              err: "unknown quantisation scheme " + str(scheme) }
+  # `with_field` and not `let out = m`, which aliases: a record is a reference,
+  # so assigning through the copy narrowed the caller's model too and left them
+  # holding the quantised weights they asked to compare against.
+  let out = with_field(with_field(m, "params", narrow(m.params, scheme, c)),
+                       "precision", scheme_name(scheme))
+  Quantized { model: out, scheme: scheme, params: count_params(m.params),
+              clipped: 0, err: "" }
 }
 
 # `sum_leaves` does not exist; `map_leaves` is the only tree walk the language
@@ -378,39 +403,39 @@ fn report(c: Comparison) -> Str {
 # after both land, which is the dtype's real width. A caller reporting current
 # footprint passes false; one sizing a future deployment passes true; nobody is
 # handed the aspiration by leaving an argument off.
-fn scheme_width(scheme: I64) -> I64 {
-  if scheme == SCHEME_F16 or scheme == SCHEME_BF16 {
-    return 2
+fn scheme_width(scheme: Scheme) -> I64 {
+  match scheme {
+    F64 => 8,
+    F16 => 2,
+    BF16 => 2,
+    Int8 => 1,
   }
-  if scheme == SCHEME_INT8 {
-    return 1
-  }
-  8
 }
 
-fn stored_bytes(m: md.Model, scheme: I64, tensors: I64, realised: Bool) -> I64 {
+fn stored_bytes(m: md.Model, scheme: Scheme, tensors: I64, realised: Bool) -> I64 {
   let n = count_params(m.params)
   if not realised {
     return n * 8
   }
-  if scheme == SCHEME_INT8 {
+  if scheme == Int8 {
     # One byte per code, plus a float64 lo and step per tensor.
     return n + tensors * 16
   }
   n * scheme_width(scheme)
 }
 
-# True elementwise comparison as 1.0 and 0.0, for summing a count.
+# The scheme's name as it is written into `Model.precision`, and so into a
+# selvedge archive.
 #
-fn scheme_name(s: I64) -> Str {
-  if s == SCHEME_F16 {
-    return "f16"
+# This is the one place the enum meets a stored string, and these four spellings
+# are the on-disk representation. They are unchanged from when the tags were
+# integers: renaming a case above is free, renaming a string here is a format
+# change.
+fn scheme_name(s: Scheme) -> Str {
+  match s {
+    F64 => "f64",
+    F16 => "f16",
+    BF16 => "bf16",
+    Int8 => "int8",
   }
-  if s == SCHEME_BF16 {
-    return "bf16"
-  }
-  if s == SCHEME_INT8 {
-    return "int8"
-  }
-  "f64"
 }

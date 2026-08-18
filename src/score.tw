@@ -190,21 +190,34 @@ fn score_csv(m: md.Model, path: Str, chunk: I64, p: Progress,
              forward: fn(Tree, Tensor) -> Tensor) -> Score {
   let x = read_csv(path)
   let cols = shape(x)[1]
-  let want = expected_columns(m)
-  if want > 0 and cols != want {
-    return Score { out: zeros(0), rows: 0,
-      err: path + " has " + str(cols) + " columns and " + m.name
-        + " expects " + str(want) + " features" }
+  let mismatch = match expected_columns(m) {
+    Some(want) => if cols == want { "" } else {
+      path + " has " + str(cols) + " columns and " + m.name
+        + " expects " + str(want) + " features" },
+    None => "",
+  }
+  if len(mismatch) > 0 {
+    return Score { out: zeros(0), rows: 0, err: mismatch }
   }
   score(m, x, chunk, p, forward)
 }
 
-# Features per row, from the signature, or -1 when the input is not rank 2.
-fn expected_columns(m: md.Model) -> I64 {
+# Features per row, or `None` when the signature does not fix one.
+#
+# There are two ways not to have a column count and the old -1 was neither of
+# them exactly: the input may not be rank 2, or its feature axis may be FREE.
+# The caller used to spell the second case as `want > 0`, which is a guard for
+# the free axis written as if it were a guard for the sentinel, and it also
+# quietly skipped the check for a declared zero-column model. `None` says the
+# one thing both cases mean, and says it here rather than at the call site.
+fn expected_columns(m: md.Model) -> Opt[I64] {
   if len(m.sig.input) != 2 {
-    return -1
+    return None
   }
-  m.sig.input[1]
+  if m.sig.input[1] == sg.FREE {
+    return None
+  }
+  Some(m.sig.input[1])
 }
 
 # ---- accuracy over a labelled dataset --------------------------------------
