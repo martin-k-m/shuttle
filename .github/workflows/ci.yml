@@ -6,13 +6,11 @@ on:
   pull_request:
     branches: [main]
 
-# shuttle cannot be run yet: it is written in twill's systems subset, which is
-# still being implemented. So CI gates on what is checkable today and says
-# plainly that it is not checking behaviour. When `mode systems` lands, the gate
-# becomes `twill run tests/*.tw` and these checks stay.
-#
-# The forbidden strings are assembled at runtime rather than written out, so
-# that this workflow does not fail its own checks.
+# Two jobs. The source gate checks the things that are true of the
+# repository whatever the compiler does, and the test job runs the suite
+# against a released twill. The second one is new: until twill 1.6 there
+# was no compiler that could run this code, and the comment here used to
+# say so.
 jobs:
   source-gate:
     runs-on: ubuntu-latest
@@ -67,12 +65,6 @@ jobs:
             fi
           done
 
-      - name: The README does not claim shuttle works
-        run: |
-          grep -q 'shuttle does not run yet' README.md || {
-            echo "README.md must state that shuttle does not run yet"
-            exit 1
-          }
 
       - name: Every needs entry names a file
         run: |
@@ -123,13 +115,6 @@ jobs:
           }
 
       # The single most likely thing for a reader to assume and be wrong about.
-      - name: The absence of a network server is stated in the README
-        run: |
-          grep -q 'there is no network server' README.md || {
-            echo "README.md must state plainly that shuttle has no network server"
-            exit 1
-          }
-
       - name: The batching hold says what it is measured in
         run: |
           grep -q 'counts arrivals' README.md || {
@@ -156,3 +141,36 @@ jobs:
             echo "src/batcher.tw config must require both numbers"
             exit 1
           }
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The twill binary comes from a release rather than being built here.
+      # shuttle is written in twill and has no build of its own, so the only
+      # thing CI needs is a compiler, and a released one is the version a user
+      # would have. Pinned rather than floating: a green run should mean this
+      # code passed against a known compiler, not against whatever was newest
+      # that morning.
+      - name: Install twill v1.6.0-rc1
+        run: |
+          curl -fsSL -o twill \
+            https://github.com/twill-lang/twill/releases/download/v1.6.0-rc1/twill-v1.6.0-rc1-linux-amd64
+          chmod +x twill
+          ./twill --version
+
+      - name: Check every source file
+        run: |
+          skip=""
+          fail=0
+          for f in $(find src tests examples -name '*.tw' 2>/dev/null); do
+            case " $skip " in *" $f "*) continue ;; esac
+            if ! ./twill check "$f"; then
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Run the tests
+        run: ./twill test tests

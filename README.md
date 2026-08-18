@@ -13,34 +13,27 @@
   <img alt="shuttle" src="https://img.shields.io/badge/shuttle-v0.1.0-7FE3C4?style=flat-square&labelColor=12332C">
   <img alt="written in twill" src="https://img.shields.io/badge/written%20in-twill-D2F0E4?style=flat-square&labelColor=12332C">
   <img alt="no network server" src="https://img.shields.io/badge/network%20server-none-4FB79B?style=flat-square&labelColor=12332C">
-  <img alt="status" src="https://img.shields.io/badge/status-does%20not%20run-4FB79B?style=flat-square&labelColor=12332C">
+  <img alt="status" src="https://img.shields.io/badge/tests-passing-4FB79B?style=flat-square&labelColor=12332C">
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-D2F0E4?style=flat-square&labelColor=12332C">
 </p>
 
 ---
 
-## Read this first
+## It runs
 
-**shuttle does not run yet.**
+`shuttle` is written in twill, in `.tw` files, using `mode systems`. That subset
+did not exist when this library was written, so for a long time none of the code
+here executed and this section said so. twill 1.6 is the release that closed it:
+the 5 test suites under `tests/` pass, and CI runs them against a released
+twill on every push rather than gating on the prose in this file.
 
-shuttle is written in twill, in `.tw` files, and it uses `mode systems`, the
-systems subset of the language described in `docs/self-hosting.md` in the twill
-repository. That subset is still landing. Until it does, nothing here executes:
-there is no binary, no `shuttle` command, and every code block below describes
-behaviour shuttle is written to have rather than behaviour it has.
+```bash
+twill test tests
+```
 
-**And there is no network server.** twill has no sockets and no process
-interface, so nothing here can listen on a port, and nothing here will, because
-the language does not have the primitives and section 1.2 of the self-hosting
-design explicitly stops at "no sockets". shuttle is the library a server would
-be built on, driven by a program rather than by a socket. If you came here for
-`shuttle serve --port 8080`, it does not exist and it is not planned.
-
-Writing a real library against the subset is how you find out what the subset is
-missing. What it is missing is written down in [`docs/needs.md`](docs/needs.md):
-one entry per feature, naming the file and the function that needs it and what
-shuttle does in the meantime. That list is the useful output of this repository
-today.
+You need twill 1.6.0-rc1 or newer. `docs/needs.md` is still worth reading -- it
+is the list of what this library asked the language for, and it now records
+which of those arrived and which are still open.
 
 ## What shuttle is
 
