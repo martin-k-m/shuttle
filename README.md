@@ -31,7 +31,7 @@ twill on every push rather than gating on the prose in this file.
 twill test tests
 ```
 
-You need twill 1.6.0-rc1 or newer. `docs/needs.md` is still worth reading -- it
+You need twill 1.6.0-rc2 or newer. `docs/needs.md` is still worth reading -- it
 is the list of what this library asked the language for, and it now records
 which of those arrived and which are still open.
 
@@ -50,7 +50,7 @@ The layer between a trained model and the thing that uses it. loom trains,
 | int8, float16 and bfloat16 with min-max and percentile calibration | written, unrun |
 | Batch scoring over a dataset, chunked, with progress | written, unrun |
 | Accuracy evaluation over a labelled dataset | written, unrun |
-| A quantisation size win | **numerics real; bytes gated on raster NEEDS-111.** See below |
+| A quantisation size win | **numerics real; bytes gated on twill NEEDS-111.** See below |
 | A progress time estimate | **not possible.** There is no clock |
 | A network server, a port, a socket, a request thread | **not possible, and not planned** |
 | Anything running end to end | **no** |
@@ -220,7 +220,7 @@ and you can measure the accuracy cost on your data before committing to it.
 
 **The bytes do not drop yet, and that is a gate rather than a fiction.** A narrow
 tensor holds narrow values but still occupies eight-byte slots until two things
-land upstream: the packed byte buffer that backs it (raster NEEDS-111, four
+land upstream: the packed byte buffer that backs it (twill NEEDS-111, four
 native primitives) and a narrow on-disk encoding (a selvedge archive format
 bump). When they do, the ratios below are real and no code in `src/quant.tw`
 changes, because the rounding was always the hard half. Until then, `stored_bytes`
@@ -325,7 +325,7 @@ Collected, so none of them has to be discovered.
 - **No clock.** The batching hold counts arrivals, warmup cannot report a
   saving, and progress has no estimate.
 - **Quantisation rounds for real but does not shrink the file yet.** The
-  numerics are exact; the bytes drop once raster NEEDS-111 and a narrow archive
+  numerics are exact; the bytes drop once twill NEEDS-111 and a narrow archive
   encoding land. Until then it measures what shrinking will cost.
 - **The input to `score_csv` is read whole.** Only the activations are chunked.
 - **Lit progress lines, but no stateful bar.** The progress line is coloured

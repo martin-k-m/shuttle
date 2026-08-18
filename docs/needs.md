@@ -34,7 +34,7 @@ Nothing else on this list matters until this does.
 on-disk encoding for one
 **Used by:** `src/quant.tw`, the whole file
 **Status:** half landed. The dtype semantics are in the language now:
-`docs/dtypes.md` in raster designs seven dtypes, `src/tensor.tw` stores each
+`docs/dtypes.md` in twill designs seven dtypes, `src/tensor.tw` stores each
 tensor's elements rounded to its dtype, `x.to(f16)` and `x.to(int8)` are
 correctly-rounded casts, and `src/quant.tw` was rewritten onto them. Two pieces
 are still missing before the bytes actually drop.
@@ -48,9 +48,9 @@ end in principle.
 
 What is still missing, and gates the size win:
 
-  1. **The packed byte buffer.** raster NEEDS-111 names four native primitives
+  1. **The packed byte buffer.** twill NEEDS-111 names four native primitives
      (`buf_new`, `buf_len`, `buf_get8`, `buf_set8`); the twill side of it is
-     written in raster's `src/buf.tw`. Until the runtime provides them, a narrow
+     written in twill's `src/buf.tw`. Until the runtime provides them, a narrow
      tensor rounds correctly and still fills eight-byte slots.
   2. **A narrow on-disk encoding.** The save format still writes eight bytes per
      element. A `Buf`-backed tensor written through a new value tag closes this,

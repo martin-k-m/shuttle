@@ -15,7 +15,7 @@ mode systems
 # The size win is designed and written but not yet realised end to end, and the
 # distinction is worth stating precisely rather than glossing. Two things
 # upstream gate the bytes actually dropping: the packed byte buffer that backs a
-# narrow tensor (raster NEEDS-111, four native primitives), and an on-disk
+# narrow tensor (twill NEEDS-111, four native primitives), and an on-disk
 # encoding that writes fewer than eight bytes per element (a selvedge archive
 # format bump, its own compatibility rule). Until both land, a narrow tensor
 # holds narrow VALUES in eight-byte slots, so this file rounds correctly and
@@ -35,7 +35,7 @@ mode systems
 # execute yet.
 #
 #   DERIVED     arithmetic, checkable by hand from the definitions below.
-#   GATED       real once raster NEEDS-111 and a selvedge format bump land; the
+#   GATED       real once twill NEEDS-111 and a selvedge format bump land; the
 #               rounding that earns it is exact today.
 #   UNMEASURED  depends on your model and your data. shuttle will not guess.
 #
@@ -245,7 +245,7 @@ fn simulate_int8(t: Tensor, c: Calibration) -> Tensor {
 # Round a tensor to float16 precision and back to f64.
 #
 # One cast each way. `t.to(f16)` rounds every element to the nearest f16, the
-# language doing it through the correctly-rounded conversion in raster's
+# language doing it through the correctly-rounded conversion in twill's
 # `src/float.tw`, and `.to(f64)` widens the result back for comparison against
 # the f64 baseline. This is exact, subnormals and the 65504 overflow edge
 # included, where the earlier hand-rolled version was a stated approximation:
@@ -398,7 +398,7 @@ fn report(c: Comparison) -> Str {
 #
 # `realised` is the honesty flag. False returns the number that is true of the
 # runtime as it stands: eight bytes per element whatever the dtype, because the
-# packed buffer (raster NEEDS-111) and the narrow on-disk encoding are not in
+# packed buffer (twill NEEDS-111) and the narrow on-disk encoding are not in
 # yet, so a narrow tensor still fills eight-byte slots. True returns the number
 # after both land, which is the dtype's real width. A caller reporting current
 # footprint passes false; one sizing a future deployment passes true; nobody is

@@ -125,7 +125,7 @@ if len(scored.err) > 0 {
 # The numerics are real: `.to(bf16)` and `.to(int8)` round exactly the way the
 # formats do, so the accuracy question is answered on your own held-out data
 # rather than guessed from a table. The bytes drop for real once the packed
-# buffer (raster NEEDS-111) and a narrow archive encoding land; until then a
+# buffer (twill NEEDS-111) and a narrow archive encoding land; until then a
 # narrow tensor rounds correctly and still fills eight-byte slots, which is why
 # the two size lines below take a `realised` flag and print both numbers.
 let held_out = read_csv("holdout.csv")

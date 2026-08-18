@@ -43,6 +43,6 @@ Deliberately not included in v0.1, and in most cases not possible:
 - Any overlap between waiting and computing. twill has no concurrency.
 - A progress time estimate or a warmup saving. twill has no clock.
 - A quantisation size win yet. The dtypes round for real, but the bytes drop
-  only once raster NEEDS-111's packed buffer and a narrow archive encoding land.
+  only once twill NEEDS-111's packed buffer and a narrow archive encoding land.
 - Activation calibration. It would mean owning the forward pass, which shuttle
   deliberately does not.
