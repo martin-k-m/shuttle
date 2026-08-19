@@ -31,7 +31,7 @@ twill on every push rather than gating on the prose in this file.
 twill test tests
 ```
 
-You need twill 1.6.3 or newer. `docs/needs.md` is still worth reading -- it
+You need twill 1.6.4 or newer. `docs/needs.md` is still worth reading -- it
 is the list of what this library asked the language for, and it now records
 which of those arrived and which are still open.
 
