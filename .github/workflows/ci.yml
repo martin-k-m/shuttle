@@ -158,10 +158,10 @@ jobs:
       # would have. Pinned rather than floating: a green run should mean this
       # code passed against a known compiler, not against whatever was newest
       # that morning.
-      - name: Install twill v1.6.5
+      - name: Install twill v1.6.6
         run: |
           curl -fsSL -o twill \
-            https://github.com/twill-lang/twill/releases/download/v1.6.5/twill-v1.6.5-linux-amd64
+            https://github.com/twill-lang/twill/releases/download/v1.6.6/twill-v1.6.6-linux-amd64
           chmod +x twill
           ./twill --version
 
