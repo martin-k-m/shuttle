@@ -192,3 +192,7 @@ jobs:
 
       - name: Run the tests
         run: ./twill test tests
+
+      # No example-run step. examples/serve.tw needs a model file that is not
+      # in the repository; it refuses cleanly when the file is absent, which is
+      # correct behaviour and not a smoke test of anything.
