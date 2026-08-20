@@ -174,11 +174,15 @@ jobs:
       - name: Fetch selvedge, which shuttle imports
         run: git clone --depth 1 https://github.com/twill-lang/selvedge ../selvedge
 
+      # Every .tw file in the repository, not a fixed list of directories.
+      # The list used to be `src tests examples`, which silently excluded
+      # anything else: bobbin's suites/ and spool's main.tw were both real
+      # programs that CI never checked, and both were broken because of it.
       - name: Check every source file
         run: |
           skip=""
           fail=0
-          for f in $(find src tests examples -name '*.tw' 2>/dev/null); do
+          for f in $(find . -name '*.tw'); do
             case " $skip " in *" $f "*) continue ;; esac
             if ! ./twill check "$f"; then
               fail=1
