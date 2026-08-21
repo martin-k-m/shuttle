@@ -1,9 +1,13 @@
 # What shuttle needs from twill
 
-shuttle is written in twill and does not run yet. This file is the reason: the
-language and runtime features the source uses that twill does not provide today,
-with the file and the function that needs each one, and what shuttle does in the
-meantime.
+shuttle is written in twill and it runs: `twill test tests` passes six suites
+and `twill run examples/serve.tw` loads a published model and answers with it.
+This file is no longer the reason it does not run. It is the record of what this
+library asked the language for, with the file and the function that needed each
+one, what shuttle did in the meantime, and, for the ones that have since
+arrived, whether shuttle has taken them up. An entry the language delivered and
+shuttle has not wired up says exactly that, because "twill cannot" and "shuttle
+has not" are different sentences and only one of them is a language work item.
 
 It is a work queue for the language, not a complaint. Every entry was reached by
 writing real code and hitting the wall, which is the only way a list like this
@@ -19,14 +23,14 @@ They are restated here with shuttle's call sites rather than cross-referenced,
 because a work queue that makes you read four repositories to find out what is
 blocking is a work queue nobody reads.
 
-## Blocking: shuttle cannot run at all without these
+## Was blocking: shuttle could not run at all without these
 
 ### 1. `mode systems` itself
 
 **Used by:** every file
-**Status:** designed in `docs/self-hosting.md`, not implemented.
+**Status:** DELIVERED in twill 1.6. Closed.
 
-Nothing else on this list matters until this does.
+Nothing else on this list mattered until this did.
 
 ### 2. A narrow tensor storage: int8, float16 and bfloat16
 
@@ -66,14 +70,26 @@ true footprint today, true is the footprint once the two pieces above land.
 **Used by:** `src/batcher.tw` (`max_hold`, which counts arrivals instead),
 `src/score.tw` (`Progress`, which has no time estimate), `src/warmup.tw`
 (which cannot report what it saved)
-**Status:** not in the language. loom entry 16 and bobbin's first entry are the
-same requirement.
+**Status:** DELIVERED in twill 1.7, and shuttle has not taken it up. `mono_ns()`
+returns a monotonic nanosecond count and `clock_now_ms()` a wall-clock
+millisecond one; both were checked against the 1.7.1 binary. No file under
+`src/` calls either.
 
-This is the most damaging absence in this repository and it damages the batcher
-most.
+So all three consequences below still hold and none of them is twill's fault any
+more. Two of the three are now small changes: `src/warmup.tw` can time its
+passes and `src/score.tw` can extrapolate a remaining time, and neither needs
+anything from the language.
+
+The batcher is the one that is still hard, and the reason is entry 13 rather
+than this one. A hold that expires after 5 ms needs something to notice the
+expiry, and with no concurrency nothing in this library runs between one
+`submit` and the next, so a deadline can only ever be checked when the next
+request arrives. That is what counting arrivals already does. A duration-bounded
+hold needs either a caller-driven tick, which is an API decision shuttle has not
+made, or concurrency, which is entry 13.
 
 Every real dynamic batcher holds a batch for a duration: "up to 5ms". shuttle
-counts arrivals, because there is no clock. The knob is therefore bounded in
+counts arrivals. The knob is therefore bounded in
 requests rather than in time, which means under thin traffic a queued request
 waits indefinitely for the next arrival and tail latency is unbounded. `flush`
 exists for that and calling it is the caller's job. The consequence, stated in
@@ -88,8 +104,8 @@ anyone wants to read.
 Third, a progress report on a four-hour scoring job is useful because of the
 time remaining, and `src/score.tw` prints a percentage.
 
-One primitive fixes all three. It is the same primitive three other repositories
-in this ecosystem want.
+That primitive exists now. Two of the three are shuttle's to write and the
+third needs a design decision first.
 
 ### 4. Function values as parameters
 
@@ -99,11 +115,13 @@ systems-mode function
 take `forward`; `predict_stream` also takes `sink`), `src/batcher.tw` (`run`,
 `flush`), `src/warmup.tw` (`warm`, `warm_with`), `src/score.tw` (`score`,
 `score_to`, `evaluate`), `src/quant.tw` (`compare`)
-**Status:** functions are values in numeric twill; whether a systems-mode
-function may take one, and how the type is spelled, is not stated anywhere.
+**Status:** DELIVERED, including the closure. A systems-mode function takes a
+function value, the type is spelled `fn(A, B) -> C`, and the closure
+`score_to` passes to `predict_stream` captures its environment and runs.
+`tests/score_test.tw` and `tests/predict_test.tw` cover both. Closed.
 
 Every entry point in this library takes the forward function. shuttle writes
-`forward: fn(Tree, Tensor) -> Tensor` and assumes that syntax.
+`forward: fn(Tree, Tensor) -> Tensor` and that is the syntax.
 
 This is not a convenience, in exactly the way loom's version of this entry is
 not. The caller owning the forward pass is the design: the thing that makes a
@@ -119,8 +137,13 @@ the stronger version, a function value that captures its environment.
 
 **Needs:** a reader that yields part of a file, or `read_csv` with a row range
 **Used by:** `src/score.tw` (`score_csv`)
-**Status:** `read_file` returns the whole file; `read_csv` returns the whole
-tensor. `std/io` says as much at the top of itself.
+**Status:** partly DELIVERED, and not usable for this. twill 1.7.1 has
+`read_file_at(path, offset, length)` and `file_size(path)`, so a byte range of a
+file is readable now. `read_csv` still returns the whole tensor and there is no
+row range, so `score_csv` would have to find its own line boundaries inside a
+byte window and parse the rows itself, which is a CSV reader in this repository.
+What is wanted is still `read_csv` with a row range, or a reader that yields
+rows.
 
 `score_csv` chunks the forward pass, which bounds the activations. It does not
 bound the input, because the whole CSV is in memory before the first chunk runs.
@@ -135,10 +158,9 @@ by the word "streaming", which would otherwise be read as more than it is.
 **Needs:** a spelling for "a tensor, or a list or record nesting tensors"
 **Used by:** `src/model.tw` (`Model.params`), and every function that takes a
 forward function, since `Tree` is its first parameter
-**Status:** the concept exists at runtime and has no name in the type language.
-loom entry 2 and selvedge entry 9 are the same wall.
-
-Systems mode makes annotations mandatory, so `Model` is currently undeclarable.
+**Status:** DELIVERED. `Tree` is the name, `Model.params` is declared with it,
+and every entry point that takes a forward function runs. Closed. loom entry 2
+and selvedge entry 9 closed the same way.
 
 ### 7. Multiple return values, or `Res[T, E]`
 
@@ -146,14 +168,21 @@ Systems mode makes annotations mandatory, so `Model` is currently undeclarable.
 `Labels`), `src/batcher.tw` (`Batch`), `src/warmup.tw` (`Warmup`),
 `src/quant.tw` (`Quantized`, `Comparison`), `src/score.tw` (`Score`,
 `Evaluation`)
-**Status:** AVAILABLE in 1.6, and not yet taken up.
+**Status:** DELIVERED in 1.6, and still not taken up. This is the entry that
+cost something.
 
 1.6 shipped `Res[T, E]`, `Opt[T]` and postfix `?`, so the language side of this
 entry is closed. The nine structs are still here, because converting them
-changes every public return type in the repository at once and that is a
-release of its own rather than a tidy-up. The order to do it in is
-`src/model.tw` first, since `Loaded` is the one a caller meets before anything
-else works.
+changes every public return type in the repository at once and that is a release
+of its own rather than a tidy-up. The order to do it in is `src/model.tw` first,
+since `Loaded` is the one a caller meets before anything else works.
+
+selvedge did the conversion and shuttle did not, and the seam between them broke
+without anything noticing: `src/model.tw` `read_unverified` went on reading an
+`err` field off `arc.read`, which had become a `Res`, so every archive load
+failed at runtime while `twill check` and the whole suite stayed green. It was
+found by running `examples/serve.tw`. The fix is a `match`, and
+`tests/model_test.tw` now loads an archive so the seam is covered.
 
 Nine structs in this repository exist to return a value alongside an error
 string. Not one of them is a type anyone wanted; each is a tuple with a name and
@@ -165,7 +194,7 @@ serving library that is worse than it is in a trainer, because the value beside
 the ignored error is a tensor of zeros and a caller who skips the check gets
 predictions rather than a crash.
 
-## Blocking: features the source assumes exist
+## Was blocking: features the source assumed exist
 
 ### 8. Activation calibration, which needs the forward pass to be observable
 
@@ -192,7 +221,9 @@ The entry stays so that the gap is a decision rather than an omission.
 **Needs:** `count(t)` over a comparison result, or `sum` accepting one
 **Used by:** `src/quant.tw` (`f64_of_bool`, `compare`), `src/score.tw`
 (`evaluate`)
-**Status:** comparisons give a boolean tensor; `sum` wants numbers.
+**Status:** DELIVERED, and taken up. `equal(a, b)` yields a 0/1 tensor that
+`sum` adds directly, which is what `q.compare` counts argmax disagreements with;
+`tests/quant_test.tw` and the example both exercise it. Closed.
 
 shuttle writes `where(t, 1.0, 0.0)` and sums that. Three call sites, one helper,
 and it allocates a full-size float tensor to count a handful of disagreements.
@@ -218,7 +249,15 @@ than start a fourth copy. selvedge's byte-identical copy can go the same way.
 
 **Needs:** `src/term/` reachable from a package
 **Used by:** `src/score.tw` (`Progress`), which now calls it
-**Status:** RESOLVED for colour and capability detection.
+**Status:** DELIVERED for colour and capability detection, and taken up, but not
+in the way recorded below. The terminal layer is under `std/`:
+`std/term/caps`, `std/term/ansi` and `std/term/theme`, which `src/score.tw`
+imports directly. Nothing is vendored and the import rule did not change. There
+is no `std/cli`, so the rate-and-ETA bar this entry wanted does not exist to
+adopt; building one here needs the clock from entry 3, which shuttle now has and
+does not call.
+
+The older account, kept because it was wrong and the correction is the point:
 
 Resolved the same way as loom's entry 8: twill's terminal modules import each
 other by a path relative to the importer, so `src/score.tw` vendors the palette
@@ -233,8 +272,11 @@ line, now lit from the shared palette so it never drifts in colour.
 ### 12. A test runner
 
 **Would improve:** `tests/`
-**Status:** none. `tests/harness.tw` is a hand-rolled counter and `report` calls
-`exit(1)`.
+**Status:** DELIVERED. `twill test tests` collects `*_test.tw`, runs each in a
+fresh interpreter and reports once. CI calls it and so does the README.
+`tests/harness.tw` stays, because the runner names the file that failed and the
+harness names the assertion inside it; deleting the three copies across three
+repositories wants a `std/test`.
 
 `tests/harness.tw` is now the fourth identical copy of the same file across four
 repositories. A `twill test` that collected `*_test.tw`, ran each in a fresh
@@ -261,18 +303,18 @@ throughput, and it says so at the top.
 ### 14. `abs` and `round` over tensors, confirmed
 
 **Would improve:** `src/quant.tw` (`simulate_f16`, `simulate_int8`)
-**Status:** `abs` is listed as an elementwise builtin; `round` is not in the
-table in the README.
+**Status:** CONFIRMED on twill 1.7.1. Both exist over tensors, and `round` is
+half away from zero: `round([0.5, 1.5, -0.5, 2.4])` gives `[1, 2, -1, 2]`.
+Closed.
 
-`src/quant.tw` calls `round` on a tensor in both quantisation paths. If it does
-not exist, or exists only for scalars, both are unwritable as they stand and the
-fallback is `floor(x + 0.5)`, which is wrong at the halfway point in a way that
-biases every weight upward by a fraction of a step. That bias is exactly what
-the file's "round, do not truncate" comment argues against, so it would be a
-silent regression rather than a compile error.
+That is the behaviour `src/quant.tw` wanted. The `floor(x + 0.5)` fallback this
+entry feared, which biases every weight upward by a fraction of a step at the
+halfway point, is not needed and should not be written.
 
-Confirming it is a documentation fix if the builtin is there and a small
-addition if it is not.
+What is still not written down is the tie rule itself, in twill's own
+documentation. It was established here by running it, and a behaviour a caller
+has to discover by experiment is a behaviour that can change without anyone
+calling it a break.
 
 ### 15. Temporary files, and cleaning up after a test
 
@@ -290,8 +332,10 @@ up after.
 
 **Needs:** a way to import a dependency by name
 **Used by:** `src/model.tw`, which imports selvedge as `../../selvedge/src/...`
-**Status:** twill resolves a non-`std/` import as a path relative to the
-importing file, and there is no other form.
+**Status:** unchanged in 1.7.1. twill resolves a non-`std/` import as a path
+relative to the importing file, and there is no other form. This is the one
+entry in this file that twill 1.7 did not move at all, and it is the reason the
+CI workflow clones selvedge into `../selvedge` before it can run the tests.
 
 shuttle depends on selvedge, and the only way to say so in source is a relative
 path that walks out of shuttle's own tree and into a sibling. That works because

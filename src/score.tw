@@ -16,11 +16,11 @@ mode systems
 # ---- progress --------------------------------------------------------------
 #
 # Rows done, rows total, percent. No time estimate, and that is a gap rather
-# than a decision: twill has no clock, so there is no elapsed time to
-# extrapolate from. The useful part of a progress report on a four-hour job is
-# the time remaining, so this is worse than what a progress bar should be, and
-# it is worse in exactly the way loom's is, for the same missing primitive.
-# docs/needs.md entry 3.
+# than a decision. twill has `mono_ns` as of 1.7 and this file does not call
+# it, so the elapsed time is there for the taking and nobody has taken it. The
+# useful part of a progress report on a four-hour job is the time remaining, so
+# this is worse than what a progress bar should be, and it is worse in exactly
+# the way loom's is, for the same unwritten code. docs/needs.md entry 3.
 #
 # Progress goes to stdout, and it is lit now. twill's terminal layer became
 # reachable from a package once its modules began importing each other by a path

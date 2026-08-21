@@ -24,36 +24,101 @@
 `shuttle` is written in twill, in `.tw` files, using `mode systems`. That subset
 did not exist when this library was written, so for a long time none of the code
 here executed and this section said so. twill 1.6 is the release that closed it:
-the 5 test suites under `tests/` pass, and CI runs them against a released
-twill on every push rather than gating on the prose in this file.
+the 6 test suites under `tests/` pass, the example loads a published model and
+answers with it, and CI runs both against a released twill on every push rather
+than gating on the prose in this file.
+
+You need twill 1.7.0 or newer. Get one:
 
 ```bash
-twill test tests
+curl -fsSL -o twill https://github.com/twill-lang/twill/releases/download/v1.7.1/twill-v1.7.1-linux-amd64
+chmod +x twill
 ```
 
-You need twill 1.7.0 or newer. `docs/needs.md` is still worth reading -- it
-is the list of what this library asked the language for, and it now records
-which of those arrived and which are still open.
+The asset name is `twill-v1.7.1-<os>-<arch>`: `linux-amd64`, `linux-arm64`,
+`darwin-amd64`, `darwin-arm64`, `windows-amd64.exe`.
+
+The suite needs a checkout of [selvedge](https://github.com/twill-lang/selvedge)
+beside this one, because `src/model.tw` imports its archive reader by path.
+Then, from the repository root:
+
+```
+$ twill test tests
+ok    tests/batcher_test.tw
+ok    tests/model_test.tw
+ok    tests/predict_test.tw
+ok    tests/quant_test.tw
+ok    tests/score_test.tw
+ok    tests/signature_test.tw
+
+6 file(s): 6 passed, 0 failed
+```
+
+And the example. This is the run with the model selvedge publishes already in
+place; see the pipeline below for how it gets there:
+
+```
+$ twill run examples/serve.tw
+blobs@1.2.0 (1af561e0982a) f64, input [_, 4] -> [_, 3] logits
+warmed 2 pass(es) at batch sizes 1 32
+class 0 with 0.999148
+blobs: shape error: the input axis 0 is 2 but the model expects 4 ([2] against [4])
+batches 3  rows 12  mean 4  configured max_batch 32 max_hold 4  refused 0
+scoring 192/192 (100%)
+scored 192 rows
+bf16: over 72 rows: mean |diff| 0.010978, max |diff| 0.047055, argmax disagreements 0
+f16:  over 72 rows: mean |diff| 0.001167, max |diff| 0.004079, argmax disagreements 0
+int8: over 72 rows: mean |diff| 0.028892, max |diff| 0.160998, argmax disagreements 0
+stored today:   1048 bytes
+int8 realised:  195 bytes
+```
+
+The shape error on the fourth line is deliberate: the example sends a two-element
+request to a four-feature model to show what the refusal looks like.
+
+Without `examples/models/blobs-1.2.0.slv` the example still runs. It falls back
+to `md.from_params` over an untrained tree and a signature declared in the file,
+which is the weaker of the two load paths and is exactly the one this README
+argues against, so it says so on the way past.
+
+## The pipeline
+
+Three repositories, one file handed along each edge. Checked out side by side:
+
+```bash
+cd loom     && twill run examples/classifier.tw
+cp loom/examples/runs/blobs.params selvedge/examples/runs/blobs.params
+cd selvedge && twill run examples/publish.tw
+cp selvedge/examples/models/blobs-1.2.0.slv shuttle/examples/models/blobs-1.2.0.slv
+cd shuttle  && twill run examples/serve.tw
+```
+
+`docs/needs.md` is still worth reading -- it is the list of what this library
+asked the language for, and it now records which of those arrived and which are
+still open.
 
 ## What shuttle is
 
 The layer between a trained model and the thing that uses it. loom trains,
 [selvedge](https://github.com/twill-lang/selvedge) ships, shuttle answers.
 
+Every row below names the test or the example that runs it. A row that names
+nothing is a row that claims nothing.
+
 | Piece | State |
 | --- | --- |
-| Load a selvedge archive, integrity verified before the weights are trusted | written, unrun |
-| Single, batched and streaming prediction | written, unrun |
-| Input validation against the model's declared shapes, with twill's kind of message | written, unrun |
-| Dynamic batching with the latency-throughput trade as two required numbers | written, unrun |
-| Warmup, with a written-out list of what it does and does not cover | written, unrun |
-| int8, float16 and bfloat16 with min-max and percentile calibration | written, unrun |
-| Batch scoring over a dataset, chunked, with progress | written, unrun |
-| Accuracy evaluation over a labelled dataset | written, unrun |
+| Load a selvedge archive, integrity verified before the weights are trusted | runs. `tests/model_test.tw` writes an archive and loads it back; the example loads the published one |
+| Single, batched and streaming prediction | runs. `tests/predict_test.tw`, and the example does all three |
+| Input validation against the model's declared shapes, with twill's kind of message | runs. `tests/signature_test.tw` asserts the message text and not only that it failed |
+| Dynamic batching with the latency-throughput trade as two required numbers | runs. `tests/batcher_test.tw`, and the example drives 12 arrivals through it |
+| Warmup, with a written-out list of what it does and does not cover | the example calls it and it reports the shapes it warmed. **No test under `tests/`** |
+| int8, float16 and bfloat16 with min-max and percentile calibration | runs. `tests/quant_test.tw`, and the example compares all three on held-out rows |
+| Batch scoring over a dataset, chunked, with progress | runs. `tests/score_test.tw`, and the example scores 192 rows |
+| Accuracy evaluation over a labelled dataset | runs. `sc.evaluate`, covered by `tests/score_test.tw`. No example uses it |
 | A quantisation size win | **numerics real; bytes gated on twill NEEDS-111.** See below |
-| A progress time estimate | **not possible.** There is no clock |
+| A progress time estimate | **not wired.** twill 1.7 has `mono_ns`; shuttle does not call it. See below |
 | A network server, a port, a socket, a request thread | **not possible, and not planned** |
-| Anything running end to end | **no** |
+| Anything running end to end | runs. `twill run examples/serve.tw`, output above |
 
 ## The forward pass stays yours
 
@@ -157,8 +222,19 @@ not doing anything and nobody would otherwise notice.
 
 ### The hold counts arrivals, not milliseconds
 
-Every real dynamic batcher holds a batch for a duration. shuttle cannot: twill
-has no clock. `max_hold` counts arrivals instead.
+Every real dynamic batcher holds a batch for a duration. shuttle's does not:
+`max_hold` counts arrivals instead.
+
+twill has a clock. `mono_ns()` and `clock_now_ms()` landed in 1.7 and this
+README used to say they did not exist. `src/batcher.tw` calls neither, so the
+hold is still counted in arrivals and the paragraph below is still what the knob
+does. What changed is whose work it is: a duration-bounded hold is now a shuttle
+change rather than a language request. It is not a small one. A hold that
+expires on time needs something to notice the expiry, and with no concurrency
+nothing runs between `submit` calls, so the deadline can only be checked when
+the next request arrives, which is the case the arrivals count already covers.
+The honest version needs a caller-driven tick, and that is a design decision
+this library has not made. `docs/needs.md` entry 3.
 
 This is a worse knob and it is the honest one. Counting arrivals bounds the wait
 in requests and not in time, so under a trickle of traffic a request can wait
@@ -201,8 +277,9 @@ request.
 **The honest summary.** For a dense float model in twill today, warmup buys the
 lazy work in your own forward function and the page faults. Real, and not large.
 For an int8 model it buys the dequantisation, which is large. shuttle reports
-the shapes it warmed and refuses to claim a saving, because there is no clock to
-measure one with.
+the shapes it warmed and refuses to claim a saving. It could measure one now:
+twill 1.7 has `mono_ns`, and `src/warmup.tw` does not call it. That is a real
+gap and it is shuttle's, not twill's.
 
 Synthetic input is drawn from the standard normal, not zeros. A relu on a zero
 input is uniformly on the flat side and every comparison against zero takes one
@@ -227,8 +304,10 @@ changes, because the rounding was always the hard half. Until then, `stored_byte
 with `realised: false` reports the true current footprint and with `true` the
 footprint after the gate clears; the default is never the aspiration.
 
-Every number below is labelled with where it comes from. Nothing here is a
-benchmark result: shuttle runs as of twill 1.6, but no benchmark has been run.
+Every number below is labelled with where it comes from. Nothing in the table is
+a benchmark result: no timing has been run, and the ratios are arithmetic. The
+accuracy figures further down are measured, on one small model, and are labelled
+as that rather than as a general result.
 
 **Quantising does not make the file smaller today.** twill stores every float as
 an f64 whatever dtype it carries, so rounding a weight to bfloat16 changes the
@@ -271,6 +350,21 @@ shape below, and the values are yours rather than ours:
 f16:  over N rows: mean |diff| ..., max |diff| ..., argmax disagreements ...
 int8: over N rows: mean |diff| ..., max |diff| ..., argmax disagreements ...
 ```
+
+`examples/serve.tw` fills that shape in on the model loom trains and selvedge
+publishes, over 72 held-out rows:
+
+```
+bf16: over 72 rows: mean |diff| 0.010978, max |diff| 0.047055, argmax disagreements 0
+f16:  over 72 rows: mean |diff| 0.001167, max |diff| 0.004079, argmax disagreements 0
+int8: over 72 rows: mean |diff| 0.028892, max |diff| 0.160998, argmax disagreements 0
+```
+
+Those are MEASURED, on one four-tensor MLP over three well separated blobs, and
+they are not a result about quantisation. A model with a decision boundary
+anywhere near its data would move rows, and this one has none near it: zero
+disagreements over 72 rows says the blobs are separable, not that int8 is free.
+Run it on your own held-out data, which is what `compare` is for.
 
 The argmax disagreement count is the one that decides whether a quantisation is
 acceptable, and it is not derivable from the weight error: two models can differ
@@ -317,8 +411,10 @@ else, and there is a test that says so.
 has no streaming reader, so a file larger than memory cannot be scored. The
 chunking bounds the activations and not the input. `docs/needs.md` entry 5.
 
-**No time estimate.** There is no clock. The useful part of a progress report on
-a four-hour job is the time remaining, and shuttle prints a percentage.
+**No time estimate.** shuttle prints a percentage, and the useful part of a
+progress report on a four-hour job is the time remaining. twill 1.7 has
+`mono_ns` and `src/score.tw` does not call it, so this is shuttle's omission and
+no longer a language limit. `docs/needs.md` entry 3.
 
 ## Stated limits
 
@@ -327,30 +423,39 @@ Collected, so none of them has to be discovered.
 - **No network server, no socket, no port, no request thread.** twill has none
   of the primitives and this is not planned.
 - **No concurrency.** The batcher accumulates and cuts; it does not overlap.
-- **No clock.** The batching hold counts arrivals, warmup cannot report a
-  saving, and progress has no estimate.
+- **Nothing here reads a clock.** The batching hold counts arrivals, warmup
+  reports no saving, and progress has no estimate. twill 1.7 has `mono_ns` and
+  `clock_now_ms`; no file in `src/` calls either, so all three of those are
+  shuttle's work and not the language's.
 - **Quantisation rounds for real but does not shrink the file yet.** The
   numerics are exact; the bytes drop once twill NEEDS-111 and a narrow archive
   encoding land. Until then it measures what shrinking will cost.
 - **The input to `score_csv` is read whole.** Only the activations are chunked.
 - **Lit progress lines, but no stateful bar.** The progress line is coloured
-  from twill's palette, vendored now that the terminal layer is reachable from a
-  package, and drops to plain text when piped. The rate-and-ETA bar from
-  `src/cli/progress.tw` is still not adopted; `docs/needs.md` entry 11.
+  from twill's palette. Nothing is vendored: `std/term/caps`, `std/term/ansi`
+  and `std/term/theme` are ordinary `std/` modules and `src/score.tw` imports
+  them directly. It drops to plain text when piped. There is no `std/cli`, so
+  there is no rate-and-ETA bar to adopt; `docs/needs.md` entry 11.
 - **`flush` is the caller's job.** Forget it and the last partial batch is
   never run.
 
 ## Install
 
-Once spool and `mode systems` both work:
+`mode systems` works. spool does not vendor shuttle for you yet, so until it
+does the way in is a clone with selvedge beside it, or:
 
 ```
 spool add shuttle https://github.com/twill-lang/shuttle
 ```
 
-spool vendors into `twill_modules/`, and twill's import is a path, so the import
-lines are the long ones in the example above and they resolve relative to the
-project root. That is twill's rule rather than shuttle's; see spool's README.
+spool vendors into `twill_modules/`, and twill's import is a path, which is why
+the import lines above are the long ones. **A path in twill, whether it is an
+import or an argument to `read_csv` or `save`, resolves against the directory of
+the file that contains it, not against the working directory.** So
+`src/model.tw` reaches selvedge as `../../selvedge/src/archive.tw`, and
+`twill run examples/serve.tw` reads and writes under `examples/` whatever
+directory you invoke it from. That is twill's rule rather than shuttle's; see
+spool's README.
 
 ## Repository layout
 

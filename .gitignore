@@ -7,3 +7,8 @@ twill_modules/
 models/
 *.slv
 scores/
+
+# The request fixtures examples/serve.tw generates on first use. Generated
+# rather than checked in, because the source gate refuses a file in this
+# repository that is not twill or documentation.
+examples/*.csv

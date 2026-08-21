@@ -1,0 +1,57 @@
+mode systems
+
+# Loading a model, through both doors.
+#
+# This suite exists because of a defect it would have caught. selvedge's
+# `arc.read` moved to `Res[Archive, Str]` and `src/model.tw` went on reading an
+# `err` field off it, so every archive load failed at runtime with "cannot
+# access field err of a non-record" while `twill check` and the other five
+# suites stayed green. Nothing under tests/ opened an archive.
+#
+# So this one writes a real archive with selvedge, in this directory, and reads
+# it back through shuttle. It is the only test in the repository that touches
+# the filesystem, and it cleans up after itself.
+
+import "harness.tw" as t
+import "../src/model.tw" as md
+import "../src/signature.tw" as sg
+import "../../selvedge/src/archive.tw" as arc
+import "../../selvedge/src/manifest.tw" as mf
+import "../../selvedge/src/version.tw" as ver
+
+let PATH = "tmp_model.slv"
+
+fn a_tree() -> Tree {
+  seed(11)
+  { w1: randn(2, 3), b1: zeros(2) }
+}
+
+fn write_archive() -> Str {
+  let sig = mf.signature([-1, 3], [-1, 2], "logits")
+  let m = mf.manifest("toy", ver.parse("1.2.0"), "mlp", sig)
+  m.architecture_detail = "dense 3->2"
+  arc.write(arc.promote(a_tree(), m), PATH)
+}
+
+fn an_archive_loads_and_carries_its_own_signature() {
+  t.equal_str("the archive is written", write_archive(), "")
+  let loaded = md.from_archive(PATH)
+  t.equal_str("the load reports no error", loaded.err, "")
+  t.equal_str("the model is named by the archive", loaded.model.name, "toy")
+  t.equal_str("and versioned by it", loaded.model.version, "toy@1.2.0")
+  t.check("the digest came out of the file", len(loaded.model.digest) == 64)
+  t.check("the signature came out of the file too",
+    sg.equal(loaded.model.sig, sg.rows_of(3, 2, "logits")))
+  t.check("and the parameters are the tree that was promoted",
+    loaded.model.params == a_tree())
+  remove_file(PATH)
+}
+
+fn a_missing_archive_is_refused_by_name_rather_than_crashing() {
+  let loaded = md.from_archive("tmp_absent.slv")
+  t.check("the load reports an error", len(loaded.err) > 0)
+}
+
+an_archive_loads_and_carries_its_own_signature()
+a_missing_archive_is_refused_by_name_rather_than_crashing()
+t.report("model")
