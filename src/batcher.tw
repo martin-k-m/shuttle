@@ -30,7 +30,15 @@ mode systems
 # ---- what a hold is measured in, and why it is not milliseconds -----------
 #
 # Every real dynamic batcher holds a batch for a duration: "up to 5ms". shuttle
-# cannot, because twill has no clock. `max_hold` counts arrivals instead.
+# does not: `max_hold` counts arrivals instead.
+#
+# Not because twill has no clock. It has `mono_ns` and `clock_now_ms` as of
+# 1.7, and this comment said otherwise for a release. The reason is that there
+# is no concurrency, so nothing in this file runs between one `submit` and the
+# next, and a deadline can only be noticed when the next request arrives, which
+# is what an arrivals count already measures. A duration-bounded hold needs a
+# caller-driven tick, which is a decision shuttle has not made.
+# docs/needs.md entry 3.
 #
 # This is a worse knob and it is the honest one. Counting arrivals bounds the
 # wait in requests and not in time, so under a trickle of traffic a request can

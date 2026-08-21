@@ -65,8 +65,9 @@ mode systems
 # own forward function and the page faults. That is a real number and it is not
 # a large one. For an int8 model it buys the dequantisation, which is large.
 # Neither is guessed at here: `Warmup.passes` and the shapes it covered are
-# reported, and the timing is yours to measure because twill has no clock
-# (docs/needs.md entry 3).
+# reported, and the timing is yours to measure because this file does not time
+# itself. twill has `mono_ns` as of 1.7 and nothing here calls it, so that is
+# an omission rather than a limit (docs/needs.md entry 3).
 
 import "signature.tw" as sg
 import "model.tw" as md

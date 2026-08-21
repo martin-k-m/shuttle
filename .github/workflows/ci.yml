@@ -158,10 +158,10 @@ jobs:
       # would have. Pinned rather than floating: a green run should mean this
       # code passed against a known compiler, not against whatever was newest
       # that morning.
-      - name: Install twill v1.7.0
+      - name: Install twill v1.7.1
         run: |
           curl -fsSL -o twill \
-            https://github.com/twill-lang/twill/releases/download/v1.7.0/twill-v1.7.0-linux-amd64
+            https://github.com/twill-lang/twill/releases/download/v1.7.1/twill-v1.7.1-linux-amd64
           chmod +x twill
           ./twill --version
 
@@ -193,6 +193,15 @@ jobs:
       - name: Run the tests
         run: ./twill test tests
 
-      # No example-run step. examples/serve.tw needs a model file that is not
-      # in the repository; it refuses cleanly when the file is absent, which is
-      # correct behaviour and not a smoke test of anything.
+      # Checking an example is not the same as running it. `twill check`
+      # follows imports for enum declarations only, and it does not read a
+      # builtin's argument kinds closely enough either: examples/serve.tw
+      # passed `[1, 3]` to `reshape`, which is a Tensor and not the Arr[I64]
+      # that builtin wants, and check was silent about it.
+      #
+      # It runs here without a published model. examples/serve.tw generates the
+      # request files it reads, and falls back to `md.from_params` over an
+      # untrained tree when models/blobs-1.2.0.slv is absent, saying so on the
+      # way past.
+      - name: Run the examples
+        run: ./twill run examples/serve.tw > /dev/null
